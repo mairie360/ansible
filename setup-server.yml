@@ -1,0 +1,203 @@
+---
+- name: "Setup Mairie360 Infrastructure"
+  hosts: mairie-dev
+  become: yes
+  vars:
+    repo_url: "https://github.com/mairie360/Deploiment.git"
+    repo_branch: "mair-23/set-up-db-deployment"
+    app_path: "/root/Deploiment"
+    admin_email: "contact@mairie360.fr"
+
+  tasks:
+    - name: Install system dependencies
+      apt:
+        name: [git, curl, jq, python3-pip, python3-yaml]
+        state: present
+        update_cache: yes
+
+    # ------------------------------------------------------------------
+    # OPTIONNEL : RESET
+    # ------------------------------------------------------------------
+    - name: Reset K3s cluster if requested
+      shell: /usr/local/bin/k3s-uninstall.sh
+      args:
+        removes: /usr/local/bin/k3s-uninstall.sh
+      when: reset_cluster | default(false) | bool
+
+    # ------------------------------------------------------------------
+    # ÉTAPE 1 : PRÉPARATION K3S ROBUSTE
+    # ------------------------------------------------------------------
+    - name: Ensure K3s configuration directory exists
+      file:
+        path: /etc/rancher/k3s
+        state: directory
+        mode: '0755'
+
+    - name: Create K3s config file (Stability & Networking)
+      copy:
+        dest: /etc/rancher/k3s/config.yaml
+        content: |
+          flannel-backend: host-gw
+          bind-address: 0.0.0.0
+          tls-san:
+            - "{{ ansible_default_ipv4.address }}"
+            - "{{ inventory_hostname }}"
+          disable:
+            - traefik
+          write-kubeconfig-mode: "644"
+
+    # ------------------------------------------------------------------
+    # ÉTAPE 2 : DURCISSEMENT SYSTEMD
+    # ------------------------------------------------------------------
+    - name: Create systemd override directory for K3s
+      file:
+        path: /etc/systemd/system/k3s.service.d
+        state: directory
+        mode: '0755'
+
+    - name: Force K3s to wait for Network Online
+      copy:
+        dest: /etc/systemd/system/k3s.service.d/override.conf
+        content: |
+          [Unit]
+          After=network-online.target
+          Wants=network-online.target
+      notify: Reload Systemd
+
+    - name: Flush handlers to apply systemd changes immediately
+      meta: flush_handlers
+
+    # ------------------------------------------------------------------
+    # ÉTAPE 3 : INSTALLATION ET RÉVEIL DU MOTEUR
+    # ------------------------------------------------------------------
+    - name: Install K3s (Lightweight Kubernetes)
+      shell: curl -sfL https://get.k3s.io | sh -
+      args:
+        creates: /usr/local/bin/k3s
+
+    - name: Force K3s to start with new config
+      systemd:
+        name: k3s
+        state: restarted
+        enabled: yes
+        daemon_reload: yes
+
+    - name: Wait for K3s API server to be ready
+      wait_for:
+        host: 127.0.0.1
+        port: 6443
+        delay: 5
+        timeout: 120
+
+    - name: Ensure .kube directory exists for root
+      file:
+        path: /root/.kube
+        state: directory
+        mode: '0700'
+
+    - name: Configure Kubeconfig for root user
+      file:
+        src: /etc/rancher/k3s/k3s.yaml
+        dest: /root/.kube/config
+        state: link
+        force: yes
+
+    - name: Install Helm
+      shell: "curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash"
+      args:
+        creates: /usr/local/bin/helm
+
+    - name: Clone Deployment Repository
+      git:
+        repo: "{{ repo_url }}"
+        dest: "{{ app_path }}"
+        version: "{{ repo_branch }}"
+        force: yes
+
+    # --- AJOUT DU LIEN SYMBOLIQUE ---
+    - name: Create symbolic link for easier access via ubuntu user
+      file:
+        src: "{{ app_path }}"
+        dest: "/home/ubuntu/Deploiment"
+        state: link
+        owner: ubuntu
+        group: ubuntu
+        force: yes
+
+    # ------------------------------------------------------------------
+    # ÉTAPE 4 : DÉPLOIEMENT COMPOSANTS CLOUD
+    # ------------------------------------------------------------------
+    - name: Deploy ArgoCD Manifests
+      shell: |
+        kubectl create namespace argocd --dry-run=client -o yaml | kubectl apply -f -
+        kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml --server-side --force-conflicts
+
+    - name: Install Nginx Ingress Controller
+      shell: kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/main/deploy/static/provider/cloud/deploy.yaml --server-side --force-conflicts
+
+    - name: Install Cert-Manager
+      shell: kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.13.0/cert-manager.yaml --server-side --force-conflicts
+
+    - name: Wait for Cert-Manager readiness
+      shell: kubectl wait --for=condition=available deployment/cert-manager-webhook -n cert-manager --timeout=120s
+
+    - name: Configure Let's Encrypt ClusterIssuer
+      copy:
+        dest: /root/letsencrypt-issuer.yaml
+        content: |
+          apiVersion: cert-manager.io/v1
+          kind: ClusterIssuer
+          metadata:
+            name: letsencrypt-prod
+          spec:
+            acme:
+              server: https://acme-v02.api.letsencrypt.org/directory
+              email: "{{ admin_email }}"
+              privateKeySecretRef:
+                name: letsencrypt-prod
+              solvers:
+              - http01:
+                  ingress:
+                    class: nginx
+
+    - name: Apply ClusterIssuer
+      shell: kubectl apply -f /root/letsencrypt-issuer.yaml
+
+    - name: Wait for ArgoCD Server availability
+      shell: kubectl wait --for=condition=available deployment/argocd-server -n argocd --timeout=300s
+
+    - name: Bootstrap GitOps (Infra Application)
+      shell: kubectl apply -f {{ app_path }}/bootstrap/appsets/infra-app.yaml
+
+    # --- FIX AUTOMATIQUE POUR ARGOCD ---
+    # On applique les annotations pour permettre le challenge Let's Encrypt
+    # (backend HTTPS + pas de redirect SSL forcé)
+    # Note : Cela suppose que l'Ingress est créé par le bootstrap ci-dessus.
+    - name: Patch ArgoCD Ingress for Let's Encrypt (Force HTTP-01)
+      shell: |
+        kubectl annotate ingress argocd-server -n argocd \
+        nginx.ingress.kubernetes.io/ssl-redirect="false" \
+        nginx.ingress.kubernetes.io/force-ssl-redirect="false" \
+        nginx.ingress.kubernetes.io/backend-protocol="HTTPS" \
+        kubernetes.io/ingress.allow-http="true" --overwrite
+      ignore_errors: yes
+      tags: argocd-patch
+
+    - name: Retrieve ArgoCD Initial Admin Password
+      shell: kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath="{.data.password}" | base64 -d
+      register: argo_password
+      changed_when: false
+
+    - name: Output Access Credentials
+      debug:
+        msg: 
+          - "ArgoCD URL: https://argo.mairie360-eip.fr"
+          - "Admin Password: {{ argo_password.stdout }}"
+
+  handlers:
+    - name: Reload Systemd
+      systemd:
+        daemon_reload: yes
+        name: k3s
+        state: restarted
+      ignore_errors: yes

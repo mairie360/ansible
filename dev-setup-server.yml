@@ -1,0 +1,51 @@
+- name: "Setup Mairie360 - {{ client_id }}"
+  hosts: mairie-dev
+  vars:
+    repo_url: "https://github.com/mairie360/Deploiment.git"
+    repo_name: "Deploiment"
+    app_path: "/root/{{ repo_name }}"
+    repo_branch: "mair-23/set-up-db-deployment"
+
+  tasks:
+    - name: 1. Installation des dépendances (Apt)
+      apt:
+        name: [git, curl, jq, python3-pip]
+        state: present
+        update_cache: yes
+
+    - name: 2. Installation de Helm
+      shell: "curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash"
+      args:
+        creates: /usr/local/bin/helm
+
+    - name: "3. Nettoyage et Clone du Repo (Branche: {{ repo_branch }})"
+      git:
+        repo: "{{ repo_url }}"
+        dest: "{{ app_path }}"
+        version: "{{ repo_branch }}"
+        force: yes
+
+    - name: 4. Création du .env
+      copy:
+        dest: "{{ app_path }}/.env"
+        mode: '0600'
+        content: |
+          GHCR_USERNAME={{ ghcr_user }}
+          GHCR_TOKEN={{ ghcr_token }}
+          GHCR_EMAIL={{ ghcr_email }}
+
+    - name: 5. Trouver les scripts .sh dans le dossier scripts/
+      find:
+        paths: "{{ app_path }}/scripts" # <--- On pointe sur le bon dossier
+        patterns: "*.sh"
+      register: found_scripts
+
+    - name: 6. Appliquer les droits d'exécution
+      file:
+        path: "{{ item.path }}"
+        mode: '0755'
+      with_items: "{{ found_scripts.files }}"
+
+    - name: 7. Affichage du résultat
+      debug:
+        var: found_scripts
