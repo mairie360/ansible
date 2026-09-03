@@ -1,0 +1,131 @@
+---
+- name: "Setup Infrastructure - Environment Instance"
+  hosts: all
+  become: yes
+  vars:
+    repo_url: "https://github.com/mairie360/Deploiment.git"
+    repo_branch: "main"
+    app_path: "/root/Deploiment"
+
+  tasks:
+    - name: 1. Install system dependencies
+      ansible.builtin.apt:
+        name: [git, curl, jq, python3-pip, python3-yaml]
+        state: present
+        update_cache: yes
+
+    - name: 2. Install K3s (Lightweight Kubernetes)
+      ansible.builtin.shell: curl -sfL https://get.k3s.io | sh -
+      args:
+        creates: /usr/local/bin/k3s
+
+    - name: 3. Ensure .kube directory exists for root
+      ansible.builtin.file:
+        path: /root/.kube
+        state: directory
+        mode: '0700'
+
+    - name: 4. Configure Kubeconfig for root
+      ansible.builtin.file:
+        src: /etc/rancher/k3s/k3s.yaml
+        dest: /root/.kube/config
+        state: link
+        force: yes
+
+    - name: 5. Install Helm
+      ansible.builtin.shell: "curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash"
+      args:
+        creates: /usr/local/bin/helm
+
+    - name: 6. Clone Deployment Repository
+      ansible.builtin.git:
+        repo: "{{ repo_url }}"
+        dest: "{{ app_path }}"
+        version: "{{ repo_branch }}"
+        force: yes
+
+    - name: 7. Create symbolic link for easier access via ubuntu user
+      ansible.builtin.file:
+        src: "{{ app_path }}"
+        dest: "/home/ubuntu/Deploiment"
+        state: link
+        owner: ubuntu
+        group: ubuntu
+        force: yes
+
+    - name: 8. Install Nginx Ingress Controller
+      ansible.builtin.shell: kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/main/deploy/static/provider/cloud/deploy.yaml --server-side --force-conflicts
+
+    - name: 9. Configure Instance Domain and ArgoCD Link in environment file
+      ansible.builtin.copy:
+        dest: "{{ app_path }}/cluster-config.env"
+        content: |
+          INSTANCE_DOMAIN={{ instance_domain }}
+          ARGOCD_HUB={{ argocd_domain }}
+          HTTPS_ENABLED=true
+
+    - name: 9.5. Create ArgoCD ServiceAccount and ClusterRoleBinding on staging
+      ansible.builtin.shell: |
+        kubectl create namespace argocd --dry-run=client -o yaml | kubectl apply -f -
+        kubectl create serviceaccount argocd-manager -n argocd --dry-run=client -o yaml | kubectl apply -f -
+        kubectl create clusterrolebinding argocd-manager-binding --clusterrole=cluster-admin --serviceaccount=argocd:argocd-manager --dry-run=client -o yaml | kubectl apply -f -
+      changed_when: false
+
+    - name: 9.6. Generate a long-lived token for ArgoCD ServiceAccount
+      ansible.builtin.shell: |
+        kubectl create token argocd-manager -n argocd --duration=8760h
+      register: staging_sa_token
+      changed_when: false
+
+    - name: 10. Generate ArgoCD Cluster Registration Manifest template
+      ansible.builtin.copy:
+        dest: "{{ app_path }}/argocd-cluster-secret.yml"
+        content: |
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: cluster-{{ inventory_hostname }}
+            namespace: argocd
+            labels:
+              argocd.argoproj.io/secret-type: cluster
+          type: Opaque
+          stringData:
+            name: {{ inventory_hostname }}
+            server: "https://{{ ansible_host }}:6443"
+            config: |
+              {
+                "bearerToken": "{{ staging_sa_token.stdout | trim }}",
+                "tlsClientConfig": {
+                  "insecure": true
+                }
+              }
+
+    - name: 11. Output Instance Readiness
+      ansible.builtin.debug:
+        msg:
+          - "Instance d'environnement initialisée avec succès !"
+          - "Domaine HTTPS de l'instance : https://{{ instance_domain }}"
+          - "Rattachée au Hub ArgoCD : https://{{ argocd_domain }}"
+          - "Manifeste de liaison ArgoCD généré dans {{ app_path }}/argocd-cluster-secret.yml"
+
+    - name: 12. Copy secret manifest to ArgoCD Hub and apply it
+      block:
+        - name: Fetch secret file from staging to ansible controller
+          ansible.builtin.fetch:
+            src: "{{ app_path }}/argocd-cluster-secret.yml"
+            dest: "/tmp/argocd-cluster-secret-{{ inventory_hostname.split('.') | first }}.yml"
+            flat: yes
+
+        - name: Copy secret file to ArgoCD Hub remote machine
+          ansible.builtin.copy:
+            src: "/tmp/argocd-cluster-secret-{{ inventory_hostname.split('.') | first }}.yml"
+            dest: "/tmp/argocd-cluster-secret.yml"
+          delegate_to: argocd-hub
+
+        - name: Apply secret on ArgoCD Hub
+          delegate_to: argocd-hub
+          become: yes
+          ansible.builtin.shell: |
+            export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+            kubectl apply -f /tmp/argocd-cluster-secret.yml
+          changed_when: true
