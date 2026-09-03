@@ -1,2 +1,3 @@
 logs
 secrets.yml
+.env

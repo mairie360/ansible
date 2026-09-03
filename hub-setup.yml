@@ -1,0 +1,161 @@
+---
+- name: "Setup Infrastructure - ArgoCD Standalone"
+  hosts: all
+  become: yes
+  vars:
+    argo_namespace: "argocd"
+    repo_url: "https://github.com/mairie360/Deploiment.git"
+    repo_branch: "mair-33-clean-helm-config"
+    app_path: "/root/Deploiment"
+  tasks:
+    - name: 1. Install system dependencies
+      apt:
+        name: [git, curl, jq, python3-pip, python3-yaml]
+        state: present
+        update_cache: yes
+
+    - name: 2. Install K3s (Lightweight Kubernetes)
+      shell: curl -sfL https://get.k3s.io | sh -
+      args:
+        creates: /usr/local/bin/k3s
+
+    - name: 3. Ensure .kube directory exists for root
+      file:
+        path: /root/.kube
+        state: directory
+        mode: '0700'
+
+    - name: 4. Configure Kubeconfig for root
+      file:
+        src: /etc/rancher/k3s/k3s.yaml
+        dest: /root/.kube/config
+        state: link
+        force: yes
+
+    - name: 5. Install Helm
+      shell: "curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash"
+      args:
+        creates: /usr/local/bin/helm
+
+    - name: 6. Clone Deployment Repository
+      git:
+        repo: "{{ repo_url }}"
+        dest: "{{ app_path }}"
+        version: "{{ repo_branch }}"
+        force: yes
+
+    - name: 7. Create symbolic link for easier access via ubuntu user
+      file:
+        src: "{{ app_path }}"
+        dest: "/home/ubuntu/Deploiment"
+        state: link
+        owner: ubuntu
+        group: ubuntu
+        force: yes
+
+    - name: 7.5. Clean up old ArgoCD resources and stale CRDs
+      ansible.builtin.shell: >
+        export KUBECONFIG=/etc/rancher/k3s/k3s.yaml &&
+        helm uninstall argocd --namespace {{ argo_namespace }} --ignore-not-found || true &&
+        kubectl delete crd applications.argoproj.io applicationsets.argoproj.io appprojects.argoproj.io --ignore-not-found=true
+      changed_when: true
+
+    - name: 7.6. Remove node taints to allow workload scheduling on single node
+      ansible.builtin.shell: >
+        export KUBECONFIG=/etc/rancher/k3s/k3s.yaml &&
+        kubectl taint nodes --all node-role.kubernetes.io/control-plane- 2>/dev/null || true &&
+        kubectl taint nodes --all node-role.kubernetes.io/master- 2>/dev/null || true
+      changed_when: true
+
+    - name: 7.7. Install yq (mikefarah - Go version)
+      ansible.builtin.get_url:
+        url: https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+        dest: /usr/local/bin/yq
+        mode: '0755'
+
+    - name: 8. Deploy ArgoCD via Helm (Split template application to prevent timeouts)
+      ansible.builtin.shell: |
+        export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+        helm repo add argo https://argoproj.github.io/argo-helm
+        helm repo update
+        rm -rf /tmp/argo-cd /tmp/argo-cd-*.tgz /tmp/argo-cd-*
+        helm pull argo/argo-cd --version 7.7.13 --destination /tmp --untar
+        kubectl create namespace {{ argo_namespace }} --dry-run=client -o yaml | kubectl apply -f -
+        helm template argocd /tmp/argo-cd \
+          --namespace {{ argo_namespace }} \
+          --set server.insecure=true \
+          --set controller.replicas=1 \
+          --set server.replicas=1 \
+          --set repoServer.replicas=1 \
+          --set dex.enabled=false \
+          --set notifications.enabled=false > /tmp/argocd-rendered.yaml
+        yq eval 'select(.kind == "CustomResourceDefinition" or .kind == "ClusterRole" or .kind == "ClusterRoleBinding" or .kind == "ConfigMap" or .kind == "Secret")' /tmp/argocd-rendered.yaml | kubectl apply -f - --server-side --force-conflicts
+        yq eval 'select(.kind != "CustomResourceDefinition" and .kind != "ClusterRole" and .kind != "ClusterRoleBinding" and .kind != "ConfigMap" and .kind != "Secret")' /tmp/argocd-rendered.yaml | kubectl apply -f - --server-side --force-conflicts
+      register: argo_helm_install
+      changed_when: true
+
+    - name: 9. Wait for ArgoCD Server availability
+      shell: kubectl wait --for=condition=available deployment/argocd-server -n {{ argo_namespace }} --timeout=300s
+
+    - name: 10. Configure ArgoCD (Insecure mode handled directly by Helm chart above)
+      ansible.builtin.debug:
+        msg: "Mode insecure configuré nativement via les valeurs Helm."
+
+    - name: 11. Retrieve ArgoCD Initial Admin Password
+      shell: kubectl -n {{ argo_namespace }} get secret argocd-initial-admin-secret -o jsonpath="{.data.password}" | base64 -d
+      register: argo_password
+      changed_when: false
+
+    - name: 12. Output Access Credentials
+      debug:
+        msg:
+          - "ArgoCD installé avec succès via Helm !"
+          - "Mot de passe Admin initial : {{ argo_password.stdout }}"
+
+    - name: 13. Generate ArgoCD Ingress from template
+      ansible.builtin.template:
+        src: "templates/argocd-ingress.yaml.j2"
+        dest: "/root/Deploiment/argocd-ingress.yaml"
+        mode: '0644'
+
+    - name: 14. Apply ArgoCD Ingress
+      ansible.builtin.shell: |
+        kubectl apply -f /root/Deploiment/argocd-ingress.yaml
+      register: ingress_result
+      changed_when: "'created' in ingress_result.stdout or 'configured' in ingress_result.stdout"
+
+    - name: 15. Install Cert-Manager
+      ansible.builtin.shell: >
+        kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.13.0/cert-manager.yaml
+        --server-side --force-conflicts --request-timeout=180s
+      changed_when: true
+
+    - name: 16. Wait for Cert-Manager readiness
+      ansible.builtin.shell: >
+        kubectl wait --for=condition=available deployment/cert-manager-webhook
+        -n cert-manager --timeout=120s
+      changed_when: false
+
+    - name: 17. Configure Let's Encrypt ClusterIssuer for Traefik
+      ansible.builtin.copy:
+        dest: /root/letsencrypt-issuer.yaml
+        content: |
+          apiVersion: cert-manager.io/v1
+          kind: ClusterIssuer
+          metadata:
+            name: letsencrypt-prod
+          spec:
+            acme:
+              server: https://acme-v02.api.letsencrypt.org/directory
+              email: "contact@mairie360.fr"
+              privateKeySecretRef:
+                name: letsencrypt-prod
+              solvers:
+              - http01:
+                  ingress:
+                    class: traefik
+        mode: '0644'
+
+    - name: 18. Apply ClusterIssuer
+      ansible.builtin.shell: kubectl apply -f /root/letsencrypt-issuer.yaml
+      changed_when: true
