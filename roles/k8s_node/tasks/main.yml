@@ -1,0 +1,156 @@
+---
+# =============================================================================
+# PHASE 1 — Prérequis Kubernetes
+#
+# Identique sur TOUTES les machines (Argo CD comme instances) : c'est le socle.
+# Ce qui tourne dessus ensuite est décidé par k8s_argocd / k8s_instance_link.
+# =============================================================================
+
+- name: Installer les dépendances système
+  ansible.builtin.apt:
+    name: [curl, jq, ufw, fail2ban, chrony, unattended-upgrades, python3-yaml]
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Désactiver le swap (kubelet le supporte mal)
+  ansible.builtin.command: swapoff -a
+  when: ansible_swaptotal_mb | default(0) | int > 0
+  changed_when: ansible_swaptotal_mb | default(0) | int > 0
+
+- name: Retirer le swap de /etc/fstab
+  ansible.posix.mount:
+    path: none
+    fstype: swap
+    state: absent
+
+# --- Pare-feu ----------------------------------------------------------------
+# Règle d'architecture : seuls les fronts sont exposés. Sur une instance,
+# 80/443 uniquement. 22 et 6443 sont réservés au tunnel WireGuard.
+
+- name: Politique UFW par défaut — entrant refusé
+  community.general.ufw:
+    direction: incoming
+    policy: deny
+
+- name: Politique UFW par défaut — sortant autorisé
+  community.general.ufw:
+    direction: outgoing
+    policy: allow
+
+- name: Ouvrir les ports publics propres au rôle de la machine
+  community.general.ufw:
+    rule: allow
+    port: "{{ item }}"
+    proto: tcp
+  loop: "{{ node_public_ports }}"
+
+- name: Autoriser SSH depuis le tunnel WireGuard
+  community.general.ufw:
+    rule: allow
+    port: "22"
+    proto: tcp
+    interface: wg0
+    direction: in
+
+# Filet de sécurité : tant que WireGuard n'est pas monté ET validé, couper le
+# SSH public verrouillerait la machine. Le rôle `wireguard` retire cette règle
+# seulement après avoir confirmé que le tunnel fonctionne.
+- name: Autoriser SSH public (temporaire, retiré après validation du VPN)
+  community.general.ufw:
+    rule: allow
+    port: "22"
+    proto: tcp
+    comment: "SSH public - retire par le role wireguard"
+
+- name: Autoriser le réseau interne des pods et services k3s
+  community.general.ufw:
+    rule: allow
+    src: "{{ item }}"
+  loop:
+    - "{{ k3s_cluster_cidr }}"
+    - "{{ k3s_service_cidr }}"
+
+- name: Activer UFW
+  community.general.ufw:
+    state: enabled
+
+- name: Configurer fail2ban pour SSH
+  ansible.builtin.copy:
+    dest: /etc/fail2ban/jail.local
+    mode: "0644"
+    content: |
+      [sshd]
+      enabled  = true
+      maxretry = 3
+      bantime  = 3600
+
+- name: Activer fail2ban
+  ansible.builtin.service:
+    name: fail2ban
+    state: started
+    enabled: true
+
+# --- k3s ---------------------------------------------------------------------
+
+- name: Créer le répertoire de configuration k3s
+  ansible.builtin.file:
+    path: /etc/rancher/k3s
+    state: directory
+    mode: "0755"
+
+- name: Écrire la configuration k3s
+  ansible.builtin.copy:
+    dest: /etc/rancher/k3s/config.yaml
+    mode: "0644"
+    content: |
+      # Traefik désactivé : ingress-nginx est le seul contrôleur, installé par
+      # Argo CD (bootstrap/appsets/ingress-nginx-appset.yaml). Deux contrôleurs
+      # se disputeraient les ports 80/443.
+      #
+      # ServiceLB reste ACTIF : sur un nœud unique, c'est lui qui lie le
+      # Service LoadBalancer d'ingress-nginx aux ports 80/443 de la machine.
+      disable:
+        - traefik
+      write-kubeconfig-mode: "0600"
+      tls-san:
+        # Indispensable : sans l'IP WireGuard dans le certificat, l'Argo CD du
+        # groupe ne pourra pas joindre cet API server sans erreur TLS.
+        - "{{ wg_ip }}"
+        - "{{ inventory_hostname }}"
+  notify: Redémarrer k3s
+
+- name: Installer k3s
+  ansible.builtin.shell: |
+    set -o pipefail
+    curl -sfL https://get.k3s.io | INSTALL_K3S_CHANNEL={{ k3s_channel }} sh -
+  args:
+    executable: /bin/bash
+    creates: /usr/local/bin/k3s
+
+- name: Appliquer immédiatement un éventuel changement de configuration k3s
+  ansible.builtin.meta: flush_handlers
+
+- name: Attendre que l'API server réponde
+  ansible.builtin.wait_for:
+    host: 127.0.0.1
+    port: 6443
+    delay: 5
+    timeout: 180
+
+- name: Attendre que le nœud soit Ready
+  ansible.builtin.command: k3s kubectl wait --for=condition=Ready node --all --timeout=180s
+  changed_when: false
+
+- name: Créer ~/.kube pour root
+  ansible.builtin.file:
+    path: /root/.kube
+    state: directory
+    mode: "0700"
+
+- name: Lier le kubeconfig pour root
+  ansible.builtin.file:
+    src: /etc/rancher/k3s/k3s.yaml
+    dest: /root/.kube/config
+    state: link
+    force: true

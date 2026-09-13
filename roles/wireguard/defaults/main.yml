@@ -1,0 +1,4 @@
+# Ferme le SSH public une fois le tunnel validé. Laisser à false tant que tu
+# n'as pas confirmé pouvoir te connecter par l'IP WireGuard : sinon tu te
+# verrouilles hors de la machine.
+wireguard_close_public_ssh: false

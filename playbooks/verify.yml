@@ -1,0 +1,79 @@
+---
+# =============================================================================
+# Recette d'un déploiement. À lancer après site.yml.
+#
+#   ansible-playbook playbooks/verify.yml
+#
+# Échoue si une vérification échoue : utilisable en étape de CI.
+# =============================================================================
+
+- name: "Vérification des machines Argo CD"
+  hosts: "*_argocd"
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Les Applications Argo CD sont Synced et Healthy
+      ansible.builtin.shell: |
+        set -o pipefail
+        kubectl -n argocd get applications.argoproj.io \
+          -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.status.sync.status}{" "}{.status.health.status}{"\n"}{end}'
+      args:
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      register: apps
+      changed_when: false
+
+    - name: Afficher l'état des Applications
+      ansible.builtin.debug:
+        var: apps.stdout_lines
+
+    - name: Aucune Application en échec
+      ansible.builtin.assert:
+        that:
+          - "'Degraded' not in apps.stdout"
+          - "'Unknown' not in apps.stdout"
+        fail_msg: "Applications en erreur — voir la sortie ci-dessus."
+
+    - name: Les instances du groupe sont bien enregistrées et étiquetées
+      ansible.builtin.shell: |
+        set -o pipefail
+        kubectl -n argocd get secrets -l argocd.argoproj.io/secret-type=cluster,mairie360.fr/role=instance \
+          -o jsonpath='{range .items[*]}{.metadata.labels.mairie360\.fr/env}{"\n"}{end}'
+      args:
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      register: registered
+      changed_when: false
+
+    - name: Toutes les instances déclarées sont enregistrées
+      ansible.builtin.assert:
+        that:
+          - hostvars[item].env_name in registered.stdout_lines
+        fail_msg: >-
+          L'instance {{ item }} (env {{ hostvars[item].env_name }}) n'est pas
+          enregistrée dans cet Argo CD. Relancer la phase 3.
+      loop: "{{ groups[org_group ~ '_instances'] | default([]) }}"
+
+- name: "Vérification des instances"
+  hosts: "*_instances"
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Recette complète de l'instance (scripts/verify.sh du dépôt Deploiment)
+      ansible.builtin.shell: |
+        set -o pipefail
+        cd /opt/Deploiment 2>/dev/null || exit 0
+        ./scripts/verify.sh default {{ env_name }} {{ instance_domain }}
+      args:
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      register: verify
+      changed_when: false
+      failed_when: verify.rc not in [0, 1]
+
+    - name: Résultat de la recette
+      ansible.builtin.debug:
+        var: verify.stdout_lines

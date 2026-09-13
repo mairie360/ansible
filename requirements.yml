@@ -1,0 +1,8 @@
+---
+# Collections requises. À installer avant le premier déploiement :
+#   ansible-galaxy collection install -r requirements.yml
+collections:
+  - name: community.general      # module ufw
+    version: ">=9.0.0"
+  - name: ansible.posix          # module mount
+    version: ">=1.5.0"

@@ -1,0 +1,41 @@
+---
+# =============================================================================
+# Déploiement complet — toutes les machines, tous les groupes.
+#
+#   ansible-playbook playbooks/site.yml
+#   ansible-playbook playbooks/site.yml --limit mairie360_argocd:mairie360_instances
+#   ansible-playbook playbooks/site.yml --limit client_example_argocd:client_example_instances
+#
+# Les trois phases correspondent à ce qu'on veut : préparer le socle k8s,
+# lancer l'infra k8s, puis relier une fois les deux côtés prêts.
+#
+# Les motifs `*_argocd` / `*_instances` sont résolus nativement par Ansible :
+# ajouter un client ne demande AUCUNE modification ici.
+# =============================================================================
+
+- name: "Phase 1 — socle système et k3s (toutes les machines)"
+  hosts: "*_argocd:*_instances"
+  become: true
+  roles:
+    - role: k8s_node
+      # Seules les instances exposent du HTTP(S) : ce sont elles qui portent
+      # les fronts. La machine Argo CD n'expose rien publiquement.
+      node_public_ports: "{{ ['80', '443'] if inventory_hostname in groups[org_group ~ '_instances'] | default([]) else [] }}"
+
+- name: "Phase 1b — tunnel WireGuard du groupe"
+  hosts: "*_argocd:*_instances"
+  become: true
+  roles:
+    - wireguard
+
+- name: "Phase 2 — Argo CD du groupe"
+  hosts: "*_argocd"
+  become: true
+  roles:
+    - k8s_argocd
+
+- name: "Phase 3 — liaison des instances à leur Argo CD"
+  hosts: "*_instances"
+  become: true
+  roles:
+    - k8s_instance_link

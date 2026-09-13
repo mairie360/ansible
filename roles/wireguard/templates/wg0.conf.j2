@@ -1,0 +1,31 @@
+# GÉNÉRÉ PAR ANSIBLE (rôle wireguard) — ne pas éditer à la main.
+#
+# Groupe : {{ org_id }}
+# Rôle   : {% if inventory_hostname in groups[org_group ~ '_argocd'] %}serveur (Argo CD){% else %}client (instance){% endif %}
+
+[Interface]
+Address = {{ wg_ip }}/24
+PrivateKey = {{ wg_private_key }}
+{% if inventory_hostname in groups[org_group ~ '_argocd'] %}
+ListenPort = {{ wg_port }}
+{% endif %}
+
+{% if inventory_hostname in groups[org_group ~ '_argocd'] %}
+{# Serveur : un pair par instance DU MÊME GROUPE. #}
+{% for host in groups[org_group ~ '_instances'] | default([]) %}
+# {{ host }}
+[Peer]
+PublicKey = {{ hostvars[host].wg_public_key }}
+AllowedIPs = {{ hostvars[host].wg_ip }}/32
+
+{% endfor %}
+{% else %}
+{# Instance : un seul pair, l'Argo CD de son groupe. #}
+{% set argocd_host = groups[org_group ~ '_argocd'][0] %}
+# {{ argocd_host }}
+[Peer]
+PublicKey = {{ hostvars[argocd_host].wg_public_key }}
+Endpoint = {{ hostvars[argocd_host].ansible_host }}:{{ wg_port }}
+AllowedIPs = {{ hostvars[argocd_host].wg_ip }}/32
+PersistentKeepalive = 25
+{% endif %}

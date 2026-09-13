@@ -1,0 +1,102 @@
+---
+# =============================================================================
+# WireGuard — un tunnel PAR GROUPE.
+#
+# L'Argo CD du groupe est le serveur (il écoute) ; chaque instance du groupe
+# initie une connexion sortante vers lui. Aucun maillage global : l'Argo CD
+# d'un client n'a aucune route réseau vers les instances d'un autre groupe.
+#
+# C'est ce tunnel qui permet de fermer le port 6443 et le SSH publics.
+# =============================================================================
+
+- name: Installer WireGuard
+  ansible.builtin.apt:
+    name: wireguard
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Générer la clé privée si elle n'existe pas
+  ansible.builtin.shell: |
+    set -o pipefail
+    umask 077 && wg genkey > /etc/wireguard/private.key
+  args:
+    executable: /bin/bash
+    creates: /etc/wireguard/private.key
+
+- name: Dériver la clé publique
+  ansible.builtin.shell: |
+    set -o pipefail
+    wg pubkey < /etc/wireguard/private.key > /etc/wireguard/public.key
+  args:
+    executable: /bin/bash
+    creates: /etc/wireguard/public.key
+
+- name: Lire la clé privée
+  ansible.builtin.slurp:
+    src: /etc/wireguard/private.key
+  register: wg_private
+
+- name: Lire la clé publique
+  ansible.builtin.slurp:
+    src: /etc/wireguard/public.key
+  register: wg_public
+
+- name: Mémoriser les clés pour les autres machines du groupe
+  ansible.builtin.set_fact:
+    wg_private_key: "{{ wg_private.content | b64decode | trim }}"
+    wg_public_key: "{{ wg_public.content | b64decode | trim }}"
+
+# Les deux facts ci-dessus sont lisibles via hostvars par les autres hôtes du
+# play : c'est ce qui permet au serveur de connaître les clés publiques de ses
+# pairs sans les stocker sur le contrôleur.
+
+- name: Écrire la configuration WireGuard
+  ansible.builtin.template:
+    src: wg0.conf.j2
+    dest: /etc/wireguard/wg0.conf
+    owner: root
+    group: root
+    mode: "0600"
+  notify: Redémarrer WireGuard
+
+- name: Ouvrir le port WireGuard (serveur du groupe uniquement)
+  community.general.ufw:
+    rule: allow
+    port: "{{ wg_port }}"
+    proto: udp
+    comment: "WireGuard"
+  when: inventory_hostname in groups[org_group ~ '_argocd']
+
+- name: Activer WireGuard
+  ansible.builtin.systemd:
+    name: "wg-quick@wg0"
+    state: started
+    enabled: true
+    daemon_reload: true
+
+- name: Appliquer immédiatement un changement de configuration
+  ansible.builtin.meta: flush_handlers
+
+# --- Fermeture du SSH public --------------------------------------------------
+# Seulement quand wireguard_close_public_ssh=true ET que le tunnel répond.
+
+- name: Vérifier que le tunnel répond avant de fermer le SSH public
+  ansible.builtin.command: "ping -c 2 -W 2 {{ hostvars[groups[org_group ~ '_argocd'][0]].wg_ip }}"
+  register: wg_ping
+  changed_when: false
+  failed_when: false
+  when:
+    - wireguard_close_public_ssh | bool
+    - inventory_hostname not in groups[org_group ~ '_argocd']
+
+- name: Fermer le SSH public
+  community.general.ufw:
+    rule: allow
+    port: "22"
+    proto: tcp
+    comment: "SSH public - retire par le role wireguard"
+    delete: true
+  when:
+    - wireguard_close_public_ssh | bool
+    - inventory_hostname in groups[org_group ~ '_argocd'] or wg_ping.rc | default(1) == 0
