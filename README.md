@@ -25,7 +25,7 @@ réseau vers un autre : l'isolation vient de la topologie.
 
 | Phase | Rôle | Cible | Ce qu'elle fait |
 |---|---|---|---|
-| 1 | `k8s_node` | toutes | Durcissement, pare-feu, k3s (Traefik désactivé, ServiceLB actif) |
+| 1 | `k8s_node` | all | Hardening, firewall, k3s (Traefik disabled, ServiceLB on), Cilium CNI + Hubble |
 | 1b | `wireguard` | toutes | Tunnel du groupe : l'Argo CD écoute, les instances s'y connectent |
 | 2 | `k8s_argocd` | `*_argocd` | Argo CD + `platform-app.yaml` + l'ApplicationSet du groupe |
 | 3 | `k8s_instance_link` | `*_instances` | `argocd cluster add` sur l'IP WireGuard + étiquetage |
@@ -68,6 +68,35 @@ Trois fichiers, aucun playbook ni rôle à toucher :
 2. `group_vars/client_x_argocd.yml` et `group_vars/client_x_instances.yml` —
    une ligne : `org_id: client-x`
 3. dans `Deploiment` : `clusters/client-x/instances/prod/values.yaml`
+
+## Network observability (Cilium / Hubble)
+
+Every machine runs Cilium as CNI instead of flannel (`k8s_node`,
+`tasks/cilium.yml`). Cilium enforces the `NetworkPolicy` objects of the
+`Deploiment` chart, and Hubble records every flow between fronts, BFFs, APIs,
+Postgres and Redis with its verdict (`FORWARDED` / `DROPPED`). It is installed
+by Ansible, not by Argo CD: without a CNI no pod starts, so nothing would ever
+sync.
+
+On a machine (as root, through the tunnel):
+
+```bash
+cilium status                                                  # agent, operator, Hubble
+hubble observe -n mairie360-dev --verdict DROPPED --last 50    # what the policies refuse
+hubble observe -n mairie360-dev --protocol http --last 50      # fronts -> bffs -> apis requests
+cilium hubble ui                                               # service map, http://localhost:12000
+```
+
+From the workstation, `scripts/hubble-flows.sh` in `Deploiment` prints the
+same thing hop by hop through a `kubectl port-forward`. HTTP details (method,
+path, status) need `global.networkPolicy.ciliumL7Visibility` in the instance
+values.
+
+Migrating a machine provisioned with flannel: re-run `site.yml`. k3s restarts
+with flannel disabled, Cilium is installed, every pod is restarted once onto
+Cilium (a few minutes of downtime) and the flannel interfaces are removed.
+Do `dev` first. Pinned versions: `cilium_version`, `cilium_cli_version`,
+`hubble_cli_version` in `group_vars/all.yml`.
 
 ## Conventions qui comptent
 

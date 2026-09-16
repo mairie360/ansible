@@ -1,0 +1,167 @@
+---
+# =============================================================================
+# CNI: Cilium + Hubble
+#
+# k3s is installed with flannel and its built-in network policy controller
+# disabled (k3s config in main.yml). Cilium takes both roles over: it
+# enforces the NetworkPolicies of the Deploiment chart AND records every flow
+# with its verdict (FORWARDED / DROPPED). Hubble is the observability side:
+# `hubble observe` on the machine, `cilium hubble ui` for the service map,
+# Deploiment/scripts/hubble-flows.sh hop by hop from the workstation.
+#
+# Installed by Ansible and NOT by Argo CD like the rest of the base: without
+# a CNI no pod can start, the node stays NotReady and Argo CD could never
+# sync anything onto it. A CNI is machine-level, like k3s itself.
+#
+# Idempotent: the CLIs are re-downloaded only when their pinned version
+# changes, `cilium upgrade` only runs when the version or the rendered values
+# change. Re-running the playbook on a machine provisioned with flannel
+# migrates it: every pod is restarted once onto Cilium (a few minutes of
+# downtime), then the flannel leftovers are removed.
+# =============================================================================
+
+# --- CLIs: cilium (install, status, UI) and hubble (observe) -----------------
+
+- name: Read the installed CLI versions
+  ansible.builtin.shell: |
+    cilium version --client 2>/dev/null | head -1 || true
+    hubble version 2>/dev/null | head -1 || true
+  args:
+    executable: /bin/bash
+  register: cli_versions
+  changed_when: false
+
+- name: Download the pinned CLI archives (sha256 verified against the release)
+  ansible.builtin.get_url:
+    url: "{{ item.url }}"
+    dest: "/usr/local/src/{{ item.file }}"
+    checksum: "sha256:{{ item.url }}.sha256sum"
+    mode: "0644"
+  loop:
+    - url: "https://github.com/cilium/cilium-cli/releases/download/{{ cilium_cli_version }}/cilium-linux-amd64.tar.gz"
+      file: "cilium-cli-{{ cilium_cli_version }}.tar.gz"
+      version: "{{ cilium_cli_version }}"
+    - url: "https://github.com/cilium/hubble/releases/download/{{ hubble_cli_version }}/hubble-linux-amd64.tar.gz"
+      file: "hubble-cli-{{ hubble_cli_version }}.tar.gz"
+      version: "{{ hubble_cli_version }}"
+  when: item.version not in cli_versions.stdout
+  loop_control:
+    label: "{{ item.file }}"
+
+- name: Install the CLIs into /usr/local/bin
+  ansible.builtin.unarchive:
+    src: "/usr/local/src/{{ item.file }}"
+    dest: /usr/local/bin
+    remote_src: true
+    include: ["{{ item.bin }}"]
+    mode: "0755"
+  loop:
+    - { file: "cilium-cli-{{ cilium_cli_version }}.tar.gz", bin: cilium, version: "{{ cilium_cli_version }}" }
+    - { file: "hubble-cli-{{ hubble_cli_version }}.tar.gz", bin: hubble, version: "{{ hubble_cli_version }}" }
+  when: item.version not in cli_versions.stdout
+  loop_control:
+    label: "{{ item.bin }} {{ item.version }}"
+
+# --- Leftovers of flannel (machines provisioned before Cilium) ----------------
+
+# Cilium writes 05-cilium.conflist, which sorts first, but a stale flannel
+# config next to it is a trap for the next person debugging the node.
+- name: Remove the flannel CNI configuration
+  ansible.builtin.file:
+    path: /var/lib/rancher/k3s/agent/etc/cni/net.d/10-flannel.conflist
+    state: absent
+
+# --- Cilium ------------------------------------------------------------------
+
+- name: Render the Cilium Helm values
+  ansible.builtin.template:
+    src: cilium-values.yaml.j2
+    dest: /etc/rancher/k3s/cilium-values.yaml
+    mode: "0644"
+  register: cilium_values
+
+- name: Read the deployed Cilium version
+  ansible.builtin.shell: |
+    set -o pipefail
+    kubectl -n kube-system get daemonset cilium \
+      -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null \
+      | sed -E 's/.*:v?([0-9]+\.[0-9]+\.[0-9]+).*/\1/'
+  args:
+    executable: /bin/bash
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  register: cilium_deployed
+  changed_when: false
+  failed_when: false
+
+- name: Install Cilium (first run on this machine)
+  ansible.builtin.command: >
+    cilium install --version {{ cilium_version }}
+    --values /etc/rancher/k3s/cilium-values.yaml
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  when: cilium_deployed.stdout | trim == ""
+  changed_when: true
+
+- name: Upgrade Cilium (pinned version or values changed)
+  ansible.builtin.command: >
+    cilium upgrade --version {{ cilium_version }}
+    --reset-values --values /etc/rancher/k3s/cilium-values.yaml
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  when:
+    - cilium_deployed.stdout | trim != ""
+    - (cilium_deployed.stdout | trim != cilium_version) or cilium_values.changed
+  changed_when: true
+
+- name: Wait for Cilium and Hubble to be ready
+  ansible.builtin.command: cilium status --wait --wait-duration 10m
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  changed_when: false
+
+# --- Move the pods onto Cilium -------------------------------------------------
+
+# A pod created before Cilium (on flannel, or Pending without CNI) has no
+# CiliumEndpoint: it is invisible to Hubble and outside policy enforcement.
+# Restarting it is the only way to give it a Cilium-managed interface.
+- name: List the pods not managed by Cilium
+  ansible.builtin.shell: |
+    set -o pipefail
+    comm -23 \
+      <(kubectl get pods -A -o json \
+          | jq -r '.items[] | select(.spec.hostNetwork != true and .status.phase != "Succeeded")
+                   | "\(.metadata.namespace) \(.metadata.name)"' | sort) \
+      <(kubectl get ciliumendpoints -A -o json \
+          | jq -r '.items[] | "\(.metadata.namespace) \(.metadata.name)"' | sort)
+  args:
+    executable: /bin/bash
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  register: unmanaged_pods
+  changed_when: false
+
+- name: Restart them so that Cilium takes their network over
+  ansible.builtin.command: >
+    kubectl -n {{ item.split(' ')[0] }} delete pod {{ item.split(' ')[1] }} --wait=false
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  loop: "{{ unmanaged_pods.stdout_lines }}"
+  changed_when: true
+
+- name: Remove the flannel interfaces
+  ansible.builtin.shell: |
+    for link in cni0 flannel.1; do
+      if ip link show "$link" >/dev/null 2>&1; then
+        ip link delete "$link" && echo "deleted $link"
+      fi
+    done
+    true
+  args:
+    executable: /bin/bash
+  register: flannel_links
+  changed_when: "'deleted' in flannel_links.stdout"
+
+- name: Wait for the node to be Ready
+  ansible.builtin.command: k3s kubectl wait --for=condition=Ready node --all --timeout=180s
+  changed_when: false
