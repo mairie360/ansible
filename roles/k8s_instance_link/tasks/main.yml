@@ -1,0 +1,140 @@
+---
+# =============================================================================
+# PHASE 3 — Liaison
+#
+# Enregistre l'instance auprès de l'Argo CD de SON groupe, une fois l'infra
+# Kubernetes en place des deux côtés.
+#
+# Deux points qui ne sont pas des détails :
+#
+# 1. Le cluster est enregistré sous le nom `env_name` (dev / staging / prod).
+#    C'est exactement ce que l'ApplicationSet attend dans destination.name.
+#    Un autre nom (l'inventory_hostname, par exemple) produit une Application
+#    bloquée en « cluster does not exist », sans autre symptôme.
+#
+# 2. L'adresse enregistrée est l'IP WireGuard, jamais l'IP publique. Le port
+#    6443 donne un accès administrateur au cluster : il n'a rien à faire sur
+#    Internet.
+# =============================================================================
+
+- name: Déterminer la machine Argo CD du groupe
+  ansible.builtin.set_fact:
+    argocd_host: "{{ groups[org_group ~ '_argocd'][0] }}"
+
+- name: Vérifier que le groupe a bien une machine Argo CD
+  ansible.builtin.assert:
+    that:
+      - groups[org_group ~ '_argocd'] | default([]) | length == 1
+    fail_msg: >-
+      Le groupe '{{ org_id }}' doit déclarer exactement une machine dans
+      '{{ org_id }}_argocd'. Trouvé :
+      {{ groups[org_group ~ '_argocd'] | default([]) | length }}.
+
+- name: Vérifier que l'environnement existe dans le dépôt Deploiment
+  ansible.builtin.assert:
+    that:
+      - env_name is defined
+      - env_name | length > 0
+    fail_msg: >-
+      La variable `env_name` doit être définie pour {{ inventory_hostname }} et
+      correspondre à un dossier clusters/{{ org_id }}/instances/<env_name>/
+      du dépôt Deploiment.
+
+# --- Récupération du kubeconfig de l'instance ---------------------------------
+
+- name: Lire le kubeconfig de l'instance
+  ansible.builtin.slurp:
+    src: /etc/rancher/k3s/k3s.yaml
+  register: instance_kubeconfig
+
+- name: Préparer un kubeconfig pointant sur l'IP WireGuard
+  ansible.builtin.set_fact:
+    # k3s écrit 127.0.0.1 : inutilisable depuis la machine Argo CD. On réécrit
+    # vers l'IP du tunnel, et on nomme le contexte comme l'environnement.
+    instance_kubeconfig_rewritten: >-
+      {{ instance_kubeconfig.content | b64decode
+         | replace('127.0.0.1', wg_ip)
+         | replace('name: default', 'name: ' ~ env_name)
+         | replace('cluster: default', 'cluster: ' ~ env_name)
+         | replace('user: default', 'user: ' ~ env_name)
+         | replace('current-context: default', 'current-context: ' ~ env_name) }}
+
+- name: Déposer le kubeconfig sur la machine Argo CD
+  ansible.builtin.copy:
+    content: "{{ instance_kubeconfig_rewritten }}"
+    dest: "/root/.kube/instance-{{ env_name }}.yaml"
+    owner: root
+    group: root
+    mode: "0600"
+  delegate_to: "{{ argocd_host }}"
+
+# --- Enregistrement -----------------------------------------------------------
+
+- name: Vérifier la connectivité Argo CD -> instance par le tunnel
+  ansible.builtin.command: "kubectl --kubeconfig /root/.kube/instance-{{ env_name }}.yaml get --raw /readyz"
+  delegate_to: "{{ argocd_host }}"
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  register: instance_readyz
+  changed_when: false
+  retries: 10
+  delay: 6
+  until: instance_readyz.rc == 0
+
+- name: Vérifier si le cluster est déjà enregistré
+  ansible.builtin.shell: |
+    set -o pipefail
+    kubectl -n argocd get secrets -l argocd.argoproj.io/secret-type=cluster \
+      -o jsonpath='{range .items[*]}{.data.name}{"\n"}{end}' \
+      | base64 -d 2>/dev/null | grep -Fx '{{ env_name }}' || true
+  args:
+    executable: /bin/bash
+  delegate_to: "{{ argocd_host }}"
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  register: cluster_already
+  changed_when: false
+
+- name: Enregistrer le cluster auprès de l'Argo CD du groupe
+  ansible.builtin.command: >
+    argocd cluster add {{ env_name }}
+    --kubeconfig /root/.kube/instance-{{ env_name }}.yaml
+    --name {{ env_name }}
+    --core --upsert --yes
+  delegate_to: "{{ argocd_host }}"
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  when: cluster_already.stdout | trim != env_name
+  changed_when: true
+
+# Ce label est ce qui distingue une instance de la machine Argo CD. Les AppSets
+# du socle (sealed-secrets, cert-manager, ingress-nginx, cluster-issuer) le
+# sélectionnent : sans lui, ils ne déploieraient rien sur cette instance.
+- name: Étiqueter le cluster comme instance du groupe
+  ansible.builtin.shell: |
+    set -o pipefail
+    SECRET=$(kubectl -n argocd get secrets -l argocd.argoproj.io/secret-type=cluster \
+      -o json | jq -r '.items[] | select((.data.name|@base64d)=="{{ env_name }}") | .metadata.name')
+    [ -n "$SECRET" ] || { echo "secret de cluster introuvable"; exit 1; }
+    kubectl -n argocd label secret "$SECRET" \
+      mairie360.fr/role=instance \
+      mairie360.fr/org={{ org_id }} \
+      mairie360.fr/env={{ env_name }} --overwrite
+  args:
+    executable: /bin/bash
+  delegate_to: "{{ argocd_host }}"
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  register: label_result
+  changed_when: "'labeled' in label_result.stdout"
+
+- name: Récapitulatif
+  ansible.builtin.debug:
+    msg:
+      - "{{ inventory_hostname }} est reliée à l'Argo CD de {{ org_id }}."
+      - "Nom du cluster dans Argo CD : {{ env_name }} (via {{ wg_ip }}:6443)"
+      - "Values attendues : clusters/{{ org_id }}/instances/{{ env_name }}/values.yaml"
+      - ""
+      - "Étape suivante — SANS elle, les pods resteront en CreateContainerConfigError :"
+      - "  ./scripts/seal-secrets.sh <contexte> {{ org_id }} {{ env_name }}"
+      - "  git add clusters/{{ org_id }}/instances/{{ env_name }}/secrets.yaml && git commit && git push"

@@ -1,0 +1,71 @@
+# GÉNÉRÉ PAR ANSIBLE (rôle k8s_argocd) — ne pas éditer sur la machine.
+# Source : roles/k8s_argocd/templates/instances-appset.yaml.j2
+#
+# ApplicationSet SCOPÉ AU GROUPE « {{ org_id }} ».
+#
+# Il ne scanne que clusters/{{ org_id }}/instances/* : cet Argo CD ne verra
+# jamais les instances d'un autre client. C'est ce qui rend inutile tout
+# préfixage des noms d'environnement — un « prod » client n'entre pas en
+# collision avec le « prod » de mairie360, puisque les deux vivent dans des
+# Argo CD différents.
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: instances
+  namespace: argocd
+spec:
+  goTemplate: true
+  goTemplateOptions: ["missingkey=error"]
+
+  # argocd-image-updater écrit le nouveau tag de chaque image dans
+  # spec.source.helm.parameters. Sans cette exception, le contrôleur
+  # ApplicationSet remettrait la liste à zéro au sync suivant.
+  ignoreApplicationDifferences:
+    - jsonPointers:
+        - /spec/sources/0/helm/parameters
+
+  generators:
+    - git:
+        repoURL: {{ deploiment_repo_url }}
+        revision: {{ deploiment_repo_branch }}
+        directories:
+          - path: "clusters/{{ org_id }}/instances/*"
+
+  template:
+    metadata:
+      name: '{% raw %}{{ .path.basename }}{% endraw %}'
+    spec:
+      project: default
+      # Multi-source : le chart d'un côté, les values de l'autre via $values.
+      # C'est ce qui évite les chemins relatifs hors du dossier du chart
+      # (../../..), lesquels imposeraient --helm-allow-value-file-paths sur le
+      # repo-server — une option déconseillée.
+      sources:
+        - repoURL: {{ deploiment_repo_url }}
+          targetRevision: {{ deploiment_repo_branch }}
+          path: charts/mairie360-stack
+          helm:
+            # releaseName = nom de l'environnement : les ressources sont
+            # préfixées dev- / staging- / prod-.
+            releaseName: '{% raw %}{{ .path.basename }}{% endraw %}'
+            valueFiles:
+              - '$values/{% raw %}{{ .path.path }}{% endraw %}/values.yaml'
+              # SealedSecret de l'instance, produit par scripts/seal-secrets.sh.
+              # Absent tant qu'il n'a pas été généré : ignoreMissingValueFiles
+              # évite de casser la sync entre-temps.
+              - '$values/{% raw %}{{ .path.path }}{% endraw %}/secrets.yaml'
+            ignoreMissingValueFiles: true
+        - repoURL: {{ deploiment_repo_url }}
+          targetRevision: {{ deploiment_repo_branch }}
+          ref: values
+      destination:
+        # Nom sous lequel le rôle k8s_instance_link enregistre le cluster.
+        name: '{% raw %}{{ .path.basename }}{% endraw %}'
+        namespace: 'mairie360-{% raw %}{{ .path.basename }}{% endraw %}'
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+          - CreateNamespace=true
+          - ServerSideApply=true

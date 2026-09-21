@@ -1,0 +1,123 @@
+---
+# =============================================================================
+# PHASE 2 — Infra Kubernetes : Argo CD du groupe
+#
+# S'applique à UNE machine par groupe (`<org>_argocd`).
+#
+# Ce rôle installe Argo CD et l'amorce. Il n'installe NI cert-manager, NI
+# ingress-nginx, NI de ClusterIssuer : tout cela est déployé par Argo CD sur
+# les instances, depuis le dépôt Deploiment. Installer ces composants ici
+# créerait un doublon en conflit avec les AppSets (versions différentes,
+# CRD concurrentes) — c'est exactement ce qui posait problème avant.
+# =============================================================================
+
+- name: Installer les dépendances du rôle
+  ansible.builtin.apt:
+    name: [git, curl]
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+# --- Argo CD ------------------------------------------------------------------
+
+- name: Créer le namespace argocd
+  ansible.builtin.shell: |
+    set -o pipefail
+    kubectl create namespace argocd --dry-run=client -o yaml | kubectl apply -f -
+  args:
+    executable: /bin/bash
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  register: ns_argocd
+  changed_when: "'created' in ns_argocd.stdout"
+
+- name: Installer Argo CD (version épinglée)
+  ansible.builtin.command: >
+    kubectl apply -n argocd --server-side --force-conflicts
+    -f https://raw.githubusercontent.com/argoproj/argo-cd/{{ argocd_version }}/manifests/install.yaml
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  register: argocd_apply
+  changed_when: "'configured' in argocd_apply.stdout or 'created' in argocd_apply.stdout"
+
+- name: Attendre la disponibilité d'Argo CD
+  ansible.builtin.command: >
+    kubectl wait --for=condition=available deployment --all
+    -n argocd --timeout=600s
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  changed_when: false
+
+- name: Installer la CLI argocd (utilisée par le rôle de liaison)
+  ansible.builtin.get_url:
+    url: "https://github.com/argoproj/argo-cd/releases/download/{{ argocd_version }}/argocd-linux-amd64"
+    dest: /usr/local/bin/argocd
+    mode: "0755"
+
+# --- Amorçage GitOps ----------------------------------------------------------
+
+- name: Récupérer le dépôt Deploiment (pour platform-app.yaml)
+  ansible.builtin.git:
+    repo: "{{ deploiment_repo_url }}"
+    dest: /opt/Deploiment
+    version: "{{ deploiment_repo_branch }}"
+    force: true
+
+- name: Adapter platform-app.yaml au dépôt et à la branche déployés
+  ansible.builtin.replace:
+    path: /opt/Deploiment/bootstrap/platform-app.yaml
+    regexp: "{{ item.re }}"
+    replace: "{{ item.rep }}"
+  loop:
+    - { re: "repoURL: https://github.com/mairie360/Deploiment.git", rep: "repoURL: {{ deploiment_repo_url }}" }
+    - { re: "targetRevision: main", rep: "targetRevision: {{ deploiment_repo_branch }}" }
+  loop_control:
+    label: "{{ item.re }}"
+
+- name: Appliquer l'Application racine (socle du groupe)
+  ansible.builtin.command: kubectl apply -n argocd -f /opt/Deploiment/bootstrap/platform-app.yaml
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  register: platform_apply
+  changed_when: "'created' in platform_apply.stdout or 'configured' in platform_apply.stdout"
+
+- name: Rendre l'ApplicationSet des instances du groupe
+  ansible.builtin.template:
+    src: instances-appset.yaml.j2
+    dest: /opt/Deploiment/instances-appset.yaml
+    mode: "0644"
+
+# C'est ce fichier qui scope l'Argo CD à `clusters/{{ org_id }}/instances/*`.
+# Il n'est pas versionné dans Deploiment parce qu'il dépend de org_id : chaque
+# groupe a le sien, et aucun Argo CD ne voit les instances d'un autre.
+- name: Appliquer l'ApplicationSet des instances
+  ansible.builtin.command: kubectl apply -n argocd -f /opt/Deploiment/instances-appset.yaml
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  register: appset_apply
+  changed_when: "'created' in appset_apply.stdout or 'configured' in appset_apply.stdout"
+
+# --- Sortie -------------------------------------------------------------------
+
+- name: Récupérer le mot de passe admin initial
+  ansible.builtin.shell: |
+    set -o pipefail
+    kubectl -n argocd get secret argocd-initial-admin-secret \
+      -o jsonpath='{.data.password}' | base64 -d
+  args:
+    executable: /bin/bash
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  register: argocd_password
+  changed_when: false
+  failed_when: false
+
+- name: Afficher les accès
+  ansible.builtin.debug:
+    msg:
+      - "Argo CD du groupe {{ org_id }} installé sur {{ inventory_hostname }}."
+      - "Mot de passe admin : {{ argocd_password.stdout | default('(déjà changé ou secret supprimé)') }}"
+      - "Accès : pas d'Ingress public. Argo CD détient les droits d'admin sur"
+      - "les instances du groupe — il se joint par le VPN :"
+      - "  ssh -L 8080:localhost:8080 {{ ansible_user }}@{{ wg_ip }}"
+      - "  kubectl -n argocd port-forward svc/argocd-server 8080:443"

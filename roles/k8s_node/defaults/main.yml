@@ -1,0 +1,3 @@
+# Ports publics selon le rôle de la machine.
+# Instance : 80/443 (les fronts). Argo CD : rien, tout passe par le VPN.
+node_public_ports: []
