@@ -61,19 +61,25 @@
   become: true
   gather_facts: false
   tasks:
-    - name: Recette complète de l'instance (scripts/verify.sh du dépôt Deploiment)
-      ansible.builtin.shell: |
-        set -o pipefail
-        cd /opt/Deploiment 2>/dev/null || exit 0
-        ./scripts/verify.sh default {{ env_name }} {{ instance_domain }}
-      args:
-        executable: /bin/bash
+    # The Deploiment checkout only lives on the Argo CD machine, which also
+    # holds a kubeconfig for each instance (phase 3), with a context named
+    # after the environment: run verify.sh from there.
+    - name: Full acceptance test of the instance (Deploiment/scripts/verify.sh)
+      ansible.builtin.command:
+        cmd: "./scripts/verify.sh {{ env_name }} {{ env_name }} {{ instance_domain }}"
+        chdir: /opt/Deploiment
       environment:
-        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+        KUBECONFIG: "/root/.kube/instance-{{ env_name }}.yaml"
+      delegate_to: "{{ groups[org_group ~ '_argocd'][0] }}"
       register: verify
       changed_when: false
-      failed_when: verify.rc not in [0, 1]
+      failed_when: false
 
-    - name: Résultat de la recette
+    - name: Acceptance test output
       ansible.builtin.debug:
         var: verify.stdout_lines
+
+    - name: Every check passed
+      ansible.builtin.assert:
+        that: verify.rc == 0
+        fail_msg: "scripts/verify.sh failed for {{ inventory_hostname }}, see its output above."

@@ -1,0 +1,32 @@
+# External secrets of each instance, the ones seal-secrets.sh cannot
+# generate. Resolved in this order, per instance:
+#   1. instance_secrets[<inventory_hostname>].<key>, e.g. from an
+#      ansible-vault file passed with -e @secrets.yml (gitignored):
+#        instance_secrets:
+#          mairie360-dev:
+#            resend_api_key: re_xxx
+#            s3_access_key: SCWxxx
+#            s3_secret_key: xxx
+#            backup_access_key_id: xxx        # only when backup.enabled
+#            backup_secret_access_key: xxx
+#   2. the environment variable of the controller (same for every instance):
+#      RESEND_API_KEY, S3_ACCESS_KEY, S3_SECRET_KEY, AWS_ACCESS_KEY_ID,
+#      AWS_SECRET_ACCESS_KEY;
+#   3. the value already sealed on the instance (kept by seal-secrets.sh);
+#   4. an interactive prompt (secrets_prompt, inventory/group_vars/all.yml).
+instance_secrets: {}
+
+instance_secret_env:
+  resend_api_key: RESEND_API_KEY
+  s3_access_key: S3_ACCESS_KEY
+  s3_secret_key: S3_SECRET_KEY
+  backup_access_key_id: AWS_ACCESS_KEY_ID
+  backup_secret_access_key: AWS_SECRET_ACCESS_KEY
+
+# Where the generated secrets.yaml is copied back: the Deploiment checkout
+# next to this repo (Devops/ansible + Devops/Deploiment).
+deploiment_local_path: "{{ playbook_dir }}/../../Deploiment"
+
+# Local backup of each instance's sealing key. Outside any git repository:
+# this key decrypts every committed secrets.yaml of the instance.
+sealing_keys_dir: "{{ lookup('ansible.builtin.env', 'HOME') }}/.mairie360/sealing-keys"

@@ -1,0 +1,46 @@
+# Rendered by Ansible (roles/k8s_node/templates/cilium-values.yaml.j2).
+# Do not edit on the machine: the next playbook run overwrites it and
+# `cilium upgrade --reset-values` makes this file the whole configuration.
+#
+# Every machine is a single-node k3s cluster: nothing here deals with
+# inter-node traffic.
+
+# Two operator replicas with anti-affinity would leave one Pending forever
+# on a single node.
+operator:
+  replicas: 1
+
+# Pod CIDR: the k3s default, which is also what UFW allows (role k8s_node).
+ipam:
+  mode: cluster-pool
+  operator:
+    clusterPoolIPv4PodCIDRList:
+      - "{{ k3s_cluster_cidr }}"
+
+# k3s keeps kube-proxy and ServiceLB (ServiceLB is what binds ingress-nginx
+# to ports 80/443 of the machine); Cilium does not replace kube-proxy.
+kubeProxyReplacement: false
+
+hubble:
+  enabled: true
+  # hubble-relay aggregates the flows of the node; `hubble observe`, the UI
+  # and Deploiment/scripts/hubble-flows.sh all talk to it.
+  relay:
+    enabled: true
+  # Service map. ClusterIP only, never exposed on the Internet: reach it with
+  # `cilium hubble ui` through the WireGuard tunnel.
+  ui:
+    enabled: true
+  # Prometheus-format metrics on the node (port 9965), ready to be scraped
+  # once a monitoring stack exists (global.monitoringNamespace in the chart).
+  metrics:
+    enableOpenMetrics: true
+    enabled:
+      - dns
+      - drop
+      - tcp
+      - flow
+      - port-distribution
+      - icmp
+      - policy
+      - "httpV2:exemplars=true;labelsContext=source_ip,source_namespace,source_workload,destination_ip,destination_namespace,destination_workload,traffic_direction"

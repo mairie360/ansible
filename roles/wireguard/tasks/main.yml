@@ -9,6 +9,22 @@
 # C'est ce tunnel qui permet de fermer le port 6443 et le SSH publics.
 # =============================================================================
 
+# The server's wg0.conf lists one peer per instance of the group, built from
+# the public key each host reads during this play. A --limit that leaves out
+# part of a group would render that file without the missing peers (or fail on
+# their undefined keys): always run this role on whole groups.
+- name: Check that the whole group is in the play
+  ansible.builtin.assert:
+    that:
+      - (groups[org_group ~ '_argocd'] + groups[org_group ~ '_instances'] | default([]))
+        | difference(ansible_play_hosts_all) | length == 0
+    fail_msg: >-
+      The WireGuard tunnel of group '{{ org_id }}' needs every machine of the
+      group in the same run. Missing:
+      {{ (groups[org_group ~ '_argocd'] + groups[org_group ~ '_instances'] | default([]))
+         | difference(ansible_play_hosts_all) | join(', ') }}.
+      Use --limit '{{ org_group }}_argocd:{{ org_group }}_instances'.
+
 - name: Installer WireGuard
   ansible.builtin.apt:
     name: wireguard

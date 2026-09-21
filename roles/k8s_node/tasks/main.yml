@@ -53,6 +53,20 @@
     interface: wg0
     direction: in
 
+# The Argo CD of the group drives each instance through its API server, over
+# the tunnel only (role k8s_instance_link registers https://<wg_ip>:6443).
+# Restricted to the Argo CD machine's tunnel IP: 6443 is cluster-admin access.
+- name: Allow the group's Argo CD to reach the API server through the tunnel
+  community.general.ufw:
+    rule: allow
+    port: "6443"
+    proto: tcp
+    interface: wg0
+    direction: in
+    from_ip: "{{ hostvars[groups[org_group ~ '_argocd'][0]].wg_ip }}"
+    comment: "k8s API from the group Argo CD"
+  when: inventory_hostname in groups[org_group ~ '_instances'] | default([])
+
 # Filet de sécurité : tant que WireGuard n'est pas monté ET validé, couper le
 # SSH public verrouillerait la machine. Le rôle `wireguard` retire cette règle
 # seulement après avoir confirmé que le tunnel fonctionne.
@@ -99,23 +113,31 @@
     state: directory
     mode: "0755"
 
-- name: Écrire la configuration k3s
+- name: Write the k3s configuration
   ansible.builtin.copy:
     dest: /etc/rancher/k3s/config.yaml
     mode: "0644"
     content: |
-      # Traefik désactivé : ingress-nginx est le seul contrôleur, installé par
-      # Argo CD (bootstrap/appsets/ingress-nginx-appset.yaml). Deux contrôleurs
-      # se disputeraient les ports 80/443.
+      # Traefik disabled: ingress-nginx is the only ingress controller,
+      # installed by Argo CD (bootstrap/appsets/ingress-nginx-appset.yaml).
+      # Two controllers would fight over ports 80/443.
       #
-      # ServiceLB reste ACTIF : sur un nœud unique, c'est lui qui lie le
-      # Service LoadBalancer d'ingress-nginx aux ports 80/443 de la machine.
+      # flannel and the built-in network policy controller disabled: Cilium
+      # is the CNI (tasks/cilium.yml). It enforces the NetworkPolicies itself
+      # and Hubble makes every flow, and every drop, visible. Until Cilium is
+      # installed the node stays NotReady: expected.
+      #
+      # ServiceLB stays ON: on a single node it is what binds the
+      # LoadBalancer Service of ingress-nginx to ports 80/443 of the machine.
+      # kube-proxy stays ON too: Cilium runs without kube-proxy replacement.
       disable:
         - traefik
+      flannel-backend: none
+      disable-network-policy: true
       write-kubeconfig-mode: "0600"
       tls-san:
-        # Indispensable : sans l'IP WireGuard dans le certificat, l'Argo CD du
-        # groupe ne pourra pas joindre cet API server sans erreur TLS.
+        # Required: without the WireGuard IP in the certificate, the Argo CD
+        # of the group cannot reach this API server without a TLS error.
         - "{{ wg_ip }}"
         - "{{ inventory_hostname }}"
   notify: Redémarrer k3s
@@ -138,10 +160,6 @@
     delay: 5
     timeout: 180
 
-- name: Attendre que le nœud soit Ready
-  ansible.builtin.command: k3s kubectl wait --for=condition=Ready node --all --timeout=180s
-  changed_when: false
-
 - name: Créer ~/.kube pour root
   ansible.builtin.file:
     path: /root/.kube
@@ -154,3 +172,9 @@
     dest: /root/.kube/config
     state: link
     force: true
+
+# --- CNI: Cilium + Hubble ------------------------------------------------------
+# Needs the API server (above) and the kubeconfig. Ends with the node Ready.
+
+- name: Install the CNI (Cilium) and Hubble
+  ansible.builtin.include_tasks: cilium.yml

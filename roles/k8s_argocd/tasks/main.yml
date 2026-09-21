@@ -97,6 +97,113 @@
   register: appset_apply
   changed_when: "'created' in appset_apply.stdout or 'configured' in appset_apply.stdout"
 
+# --- GHCR credentials (argocd/ghcr-secret) ------------------------------------
+# argocd-image-updater reads the GHCR tags with pullsecret:argocd/ghcr-secret
+# (Deploiment/bootstrap/appsets/image-updater-app.yaml). Nothing in Deploiment
+# creates it: the token is not committable, even sealed (this machine has no
+# sealed-secrets controller).
+
+- name: Read the GHCR credentials already stored on this machine
+  ansible.builtin.shell: |
+    set -o pipefail
+    kubectl -n argocd get secret ghcr-secret -o json 2>/dev/null \
+      | jq -c '.data[".dockerconfigjson"] | @base64d | fromjson | .auths["ghcr.io"] | {username, password}' \
+      || echo '{}'
+  args:
+    executable: /bin/bash
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  register: ghcr_existing
+  changed_when: false
+  no_log: true
+
+- name: Resolve the GHCR credentials (variables, else this machine)
+  ansible.builtin.set_fact:
+    ghcr_resolved_user: "{{ ghcr_user if ghcr_token | length > 0 else (ghcr_existing.stdout | from_json).username | default('', true) }}"
+    ghcr_resolved_token: "{{ ghcr_token if ghcr_token | length > 0 else (ghcr_existing.stdout | from_json).password | default('', true) }}"
+  no_log: true
+
+- name: Ask for the GHCR user
+  ansible.builtin.pause:
+    prompt: "[{{ org_id }}] GHCR user for ghcr-secret (read:packages token owner, empty to skip)"
+  register: ghcr_user_prompt
+  when:
+    - secrets_prompt | bool
+    - ghcr_resolved_token | length == 0
+
+- name: Ask for the GHCR token
+  ansible.builtin.pause:
+    prompt: "[{{ org_id }}] GHCR token (read:packages, hidden, empty to skip)"
+    echo: false
+  register: ghcr_token_prompt
+  when:
+    - secrets_prompt | bool
+    - ghcr_resolved_token | length == 0
+    - ghcr_user_prompt.user_input | default('') | length > 0
+
+- name: Keep the prompted GHCR credentials
+  ansible.builtin.set_fact:
+    ghcr_resolved_user: "{{ ghcr_user_prompt.user_input }}"
+    ghcr_resolved_token: "{{ ghcr_token_prompt.user_input }}"
+  when: ghcr_token_prompt.user_input | default('') | length > 0
+  no_log: true
+
+- name: Write argocd/ghcr-secret
+  ansible.builtin.shell: |
+    set -o pipefail
+    kubectl -n argocd create secret docker-registry ghcr-secret \
+      --docker-server=ghcr.io \
+      --docker-username="$GHCR_USER" --docker-password="$GHCR_TOKEN" \
+      --dry-run=client -o yaml | kubectl apply -f -
+  args:
+    executable: /bin/bash
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+    GHCR_USER: "{{ ghcr_resolved_user }}"
+    GHCR_TOKEN: "{{ ghcr_resolved_token }}"
+  register: ghcr_apply
+  changed_when: "'unchanged' not in ghcr_apply.stdout"
+  when: ghcr_resolved_token | length > 0
+  no_log: true
+
+- name: Warn when no GHCR credentials are available
+  ansible.builtin.debug:
+    msg: >-
+      No GHCR credentials (GHCR_USER / GHCR_TOKEN): argocd-image-updater cannot
+      list tags, image tags will not be updated automatically.
+  when: ghcr_resolved_token | length == 0
+
+# --- argocd-image-updater: one ImageUpdater per instance ----------------------
+# The CRD is installed by the argocd-image-updater Application that
+# platform-app has just started syncing: wait for it before applying.
+
+- name: Wait for the ImageUpdater CRD
+  ansible.builtin.command: >
+    kubectl wait --for condition=established --timeout=30s
+    crd/imageupdaters.argocd-image-updater.argoproj.io
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  register: imageupdater_crd
+  changed_when: false
+  retries: 30
+  delay: 10
+  until: imageupdater_crd.rc == 0
+
+- name: Render the ImageUpdaters of the group
+  ansible.builtin.template:
+    src: image-updaters.yaml.j2
+    dest: /opt/Deploiment/image-updaters.yaml
+    mode: "0644"
+  when: groups[org_group ~ '_instances'] | default([]) | length > 0
+
+- name: Apply the ImageUpdaters of the group
+  ansible.builtin.command: kubectl apply -f /opt/Deploiment/image-updaters.yaml
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  register: imageupdaters_apply
+  changed_when: "'created' in imageupdaters_apply.stdout or 'configured' in imageupdaters_apply.stdout"
+  when: groups[org_group ~ '_instances'] | default([]) | length > 0
+
 # --- Sortie -------------------------------------------------------------------
 
 - name: Récupérer le mot de passe admin initial
