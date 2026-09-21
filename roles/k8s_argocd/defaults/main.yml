@@ -1,0 +1,34 @@
+# Images followed by argocd-image-updater in every instance of the group.
+# `path` is the Helm values path of the instance in charts/mairie360-stack
+# (APIs|BFFs|Fronts.instances.<key>). Keep in sync with the instance keys of
+# Deploiment/clusters/*/instances/*/values.yaml.
+# Note the project-front key vs projects-front image: the alias follows the
+# key, the image follows the registry.
+image_updater_services:
+  - { alias: core-api,        image: ghcr.io/mairie360/core-api,            path: APIs.instances.core-api }
+  - { alias: project-api,     image: ghcr.io/mairie360/project-api,         path: APIs.instances.project-api }
+  - { alias: calendar-api,    image: ghcr.io/mairie360/calendar-api,        path: APIs.instances.calendar-api }
+  - { alias: message-api,     image: ghcr.io/mairie360/message-api,         path: APIs.instances.message-api }
+  - { alias: elearning-api,   image: ghcr.io/mairie360/elearning-api,       path: APIs.instances.elearning-api }
+  - { alias: user-bff,        image: ghcr.io/mairie360/bff-user,            path: BFFs.instances.user-bff }
+  - { alias: project-bff,     image: ghcr.io/mairie360/bff-project,         path: BFFs.instances.project-bff }
+  - { alias: calendar-bff,    image: ghcr.io/mairie360/bff-calendar,        path: BFFs.instances.calendar-bff }
+  - { alias: message-bff,     image: ghcr.io/mairie360/bff-message,         path: BFFs.instances.message-bff }
+  - { alias: dashboard-bff,   image: ghcr.io/mairie360/bff-dashboard,       path: BFFs.instances.dashboard-bff }
+  - { alias: settings-bff,    image: ghcr.io/mairie360/bff-settings,        path: BFFs.instances.settings-bff }
+  - { alias: elearning-bff,   image: ghcr.io/mairie360/bff-elearning,       path: BFFs.instances.elearning-bff }
+  - { alias: login-front,     image: ghcr.io/mairie360/login-front,         path: Fronts.instances.login-front }
+  - { alias: project-front,   image: ghcr.io/mairie360/projects-front,      path: Fronts.instances.project-front }
+  - { alias: calendar-front,  image: ghcr.io/mairie360/calendar-front,      path: Fronts.instances.calendar-front }
+  - { alias: message-front,   image: ghcr.io/mairie360/message-front,       path: Fronts.instances.message-front }
+  - { alias: dashboard-front, image: ghcr.io/mairie360/dashboard-front,     path: Fronts.instances.dashboard-front }
+  - { alias: settings-front,  image: ghcr.io/mairie360/settings-front,      path: Fronts.instances.settings-front }
+  - { alias: elearning-front, image: ghcr.io/mairie360/elearning-front,     path: Fronts.instances.elearning-front }
+  - { alias: admin-front,     image: ghcr.io/mairie360/administrator-front, path: Fronts.instances.admin-front }
+
+# Tag policy per environment name. Any env not listed (a client's `prod`, for
+# instance) gets `default`: released semver tags only.
+image_updater_policies:
+  dev:     { strategy: newest-build, allow_tags: "regexp:^dev-.*" }
+  staging: { strategy: newest-build, allow_tags: "regexp:^staging-.*" }
+  default: { strategy: semver,       allow_tags: "regexp:^v?[0-9]+\\.[0-9]+\\.[0-9]+$" }

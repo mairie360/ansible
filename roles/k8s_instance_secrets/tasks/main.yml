@@ -1,0 +1,297 @@
+---
+# =============================================================================
+# PHASE 4 — Instance secrets
+#
+# Seals the Secrets of one instance with ITS sealed-secrets controller, by
+# running Deploiment/scripts/seal-secrets.sh on the group's Argo CD machine:
+# it is the only machine that reaches the instance API server (through the
+# tunnel), the workstation does not.
+#
+#   1. waits for the sealed-secrets controller Argo CD deploys on the instance
+#      (it needs the mairie360.fr/role=instance label set by phase 3);
+#   2. resolves the external secrets (Resend, S3, backup bucket, GHCR) from
+#      variables, else keeps what the instance already has, else prompts;
+#   3. runs seal-secrets.sh (generated secrets — JWT, Postgres, Redis — are
+#      kept when they already exist on the instance, never rotated here);
+#   4. copies secrets.yaml back into the local Deploiment checkout, and the
+#      instance sealing key into sealing_keys_dir.
+#
+# Committing and pushing secrets.yaml stays a manual step: Argo CD only
+# deploys the secrets once it is on the tracked branch.
+#
+# Runs with `serial: 1` (playbooks/secrets.yml): prompts are then asked per
+# instance, not once for the whole play.
+# =============================================================================
+
+- name: Resolve the group's Argo CD machine and the instance paths
+  ansible.builtin.set_fact:
+    argocd_host: "{{ groups[org_group ~ '_argocd'][0] }}"
+    instance_kubeconfig: "/root/.kube/instance-{{ env_name }}.yaml"
+    instance_ns: "mairie360-{{ env_name }}"
+    instance_dir: "clusters/{{ org_id }}/instances/{{ env_name }}"
+
+- name: Check that the local Deploiment checkout exists
+  ansible.builtin.stat:
+    path: "{{ deploiment_local_path }}/{{ instance_dir }}"
+  delegate_to: localhost
+  become: false
+  register: local_instance_dir
+
+- name: Fail when secrets.yaml cannot be copied back
+  ansible.builtin.assert:
+    that: local_instance_dir.stat.isdir | default(false)
+    fail_msg: >-
+      {{ deploiment_local_path }}/{{ instance_dir }} does not exist on this
+      workstation. Clone Deploiment next to this repo or pass
+      -e deploiment_local_path=<path to the Deploiment checkout>.
+
+# --- kubeseal on the Argo CD machine -----------------------------------------
+
+- name: Read the installed kubeseal version
+  ansible.builtin.shell: kubeseal --version 2>/dev/null || true
+  delegate_to: "{{ argocd_host }}"
+  register: kubeseal_installed
+  changed_when: false
+
+- name: Install kubeseal (pinned, sha256 verified against the release)
+  when: kubeseal_version not in kubeseal_installed.stdout
+  delegate_to: "{{ argocd_host }}"
+  block:
+    - name: Download the kubeseal archive
+      ansible.builtin.get_url:
+        url: "https://github.com/bitnami-labs/sealed-secrets/releases/download/v{{ kubeseal_version }}/kubeseal-{{ kubeseal_version }}-linux-amd64.tar.gz"
+        dest: "/usr/local/src/kubeseal-{{ kubeseal_version }}-linux-amd64.tar.gz"
+        checksum: "sha256:https://github.com/bitnami-labs/sealed-secrets/releases/download/v{{ kubeseal_version }}/sealed-secrets_{{ kubeseal_version }}_checksums.txt"
+        mode: "0644"
+
+    - name: Install kubeseal into /usr/local/bin
+      ansible.builtin.unarchive:
+        src: "/usr/local/src/kubeseal-{{ kubeseal_version }}-linux-amd64.tar.gz"
+        dest: /usr/local/bin
+        remote_src: true
+        include: [kubeseal]
+        mode: "0755"
+
+# --- Deploiment checkout and instance state ----------------------------------
+
+- name: Refresh the Deploiment checkout on the Argo CD machine
+  ansible.builtin.git:
+    repo: "{{ deploiment_repo_url }}"
+    dest: /opt/Deploiment
+    version: "{{ deploiment_repo_branch }}"
+    force: true
+  delegate_to: "{{ argocd_host }}"
+
+# Deployed by Argo CD (sealed-secrets-appset) once phase 3 labelled the
+# cluster: on a fresh instance this takes a few minutes.
+- name: Wait for the sealed-secrets controller on the instance
+  ansible.builtin.command: >
+    kubectl --kubeconfig {{ instance_kubeconfig }} -n kube-system
+    rollout status deployment/sealed-secrets-controller --timeout=10s
+  delegate_to: "{{ argocd_host }}"
+  register: controller_ready
+  changed_when: false
+  retries: 60
+  delay: 10
+  until: controller_ready.rc == 0
+
+- name: Read the instance values
+  ansible.builtin.slurp:
+    src: "/opt/Deploiment/{{ instance_dir }}/values.yaml"
+  delegate_to: "{{ argocd_host }}"
+  register: instance_values_raw
+
+# Which external secrets already hold a value on the instance: seal-secrets.sh
+# keeps those, so they are not asked again.
+- name: Read which external secrets the instance already has
+  ansible.builtin.shell: |
+    set -o pipefail
+    K="kubectl --kubeconfig {{ instance_kubeconfig }} -n {{ instance_ns }}"
+    app=$($K get secret {{ env_name }}-app-secrets -o json 2>/dev/null || echo '{}')
+    backup=$($K get secret {{ env_name }}-backup-secret -o name 2>/dev/null || true)
+    ghcr=$($K get secret ghcr-secret -o name 2>/dev/null || true)
+    jq -cn --argjson app "$app" --arg backup "$backup" --arg ghcr "$ghcr" '{
+      resend_api_key: (($app.data.SMTP_PASSWORD // "") != ""),
+      s3_access_key:  (($app.data.S3_ACCESS_KEY // "") != ""),
+      s3_secret_key:  (($app.data.S3_SECRET_KEY // "") != ""),
+      backup_access_key_id:     ($backup != ""),
+      backup_secret_access_key: ($backup != ""),
+      ghcr: ($ghcr != "")
+    }'
+  args:
+    executable: /bin/bash
+  delegate_to: "{{ argocd_host }}"
+  register: on_cluster_raw
+  changed_when: false
+
+- name: Resolve the external secrets from variables
+  ansible.builtin.set_fact:
+    on_cluster: "{{ on_cluster_raw.stdout | from_json }}"
+    backup_enabled: "{{ ((instance_values_raw.content | b64decode | from_yaml).backup | default({})).enabled | default(false) | bool }}"
+    resolved_secrets: >-
+      {{ resolved_secrets | default({}) | combine({
+           item.key: (instance_secrets[inventory_hostname] | default({}))[item.key]
+                     | default(lookup('ansible.builtin.env', item.value), true)
+         }) }}
+  loop: "{{ instance_secret_env | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  no_log: true
+
+# --- Prompts -----------------------------------------------------------------
+# Only for what is neither provided nor already on the instance. The backup
+# bucket keys are only asked when backup.enabled is true in the instance
+# values. Leave a prompt empty to skip it: seal-secrets.sh then seals the key
+# empty and verify.yml reports it.
+
+- name: Ask for the missing external secrets
+  ansible.builtin.pause:
+    prompt: "[{{ inventory_hostname }}] {{ item.label }} (hidden, empty to skip)"
+    echo: false
+  register: secret_prompts
+  loop:
+    - { key: resend_api_key, label: "Resend API key (SMTP_PASSWORD of core-api)" }
+    - { key: s3_access_key, label: "Object Storage access key (S3_ACCESS_KEY of elearning-api)" }
+    - { key: s3_secret_key, label: "Object Storage secret key (S3_SECRET_KEY of elearning-api)" }
+    - { key: backup_access_key_id, label: "Backup bucket access key (AWS_ACCESS_KEY_ID)" }
+    - { key: backup_secret_access_key, label: "Backup bucket secret key (AWS_SECRET_ACCESS_KEY)" }
+  loop_control:
+    label: "{{ item.key }}"
+  when:
+    - secrets_prompt | bool
+    - resolved_secrets[item.key] | length == 0
+    - not on_cluster[item.key]
+    - backup_enabled | bool or not item.key.startswith('backup_')
+
+- name: Keep the prompted secrets
+  ansible.builtin.set_fact:
+    resolved_secrets: "{{ resolved_secrets | combine({item.item.key: item.user_input}) }}"
+  loop: "{{ secret_prompts.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item.key }}"
+  when: item.user_input | default('') | length > 0
+  no_log: true
+
+# --- GHCR pull secret ----------------------------------------------------------
+# seal-secrets.sh only writes ghcr-secret when GHCR_TOKEN is set: without it,
+# a ghcr-secret sealed earlier would disappear from secrets.yaml and be pruned.
+# Same credentials as argocd/ghcr-secret, written by phase 2.
+
+- name: Read the GHCR credentials of the Argo CD machine
+  ansible.builtin.shell: |
+    set -o pipefail
+    kubectl -n argocd get secret ghcr-secret -o json 2>/dev/null \
+      | jq -c '.data[".dockerconfigjson"] | @base64d | fromjson | .auths["ghcr.io"] | {username, password}' \
+      || echo '{}'
+  args:
+    executable: /bin/bash
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  delegate_to: "{{ argocd_host }}"
+  register: ghcr_argocd
+  changed_when: false
+  when: ghcr_token | length == 0
+  no_log: true
+
+- name: Resolve the GHCR credentials
+  ansible.builtin.set_fact:
+    ghcr_seal_user: "{{ ghcr_user if ghcr_token | length > 0 else (ghcr_argocd.stdout | default('{}') | from_json).username | default('', true) }}"
+    ghcr_seal_token: "{{ ghcr_token if ghcr_token | length > 0 else (ghcr_argocd.stdout | default('{}') | from_json).password | default('', true) }}"
+  no_log: true
+
+- name: Stop before dropping the instance's existing ghcr-secret
+  ansible.builtin.assert:
+    that: ghcr_seal_token | length > 0 or not on_cluster.ghcr
+    fail_msg: >-
+      {{ instance_ns }} has a ghcr-secret but no GHCR credentials are known
+      (GHCR_USER / GHCR_TOKEN unset, no argocd/ghcr-secret): sealing now would
+      remove it. Export GHCR_USER / GHCR_TOKEN or re-run site.yml (phase 2 asks).
+
+# --- Sealing -------------------------------------------------------------------
+
+- name: Seal the instance secrets (Deploiment/scripts/seal-secrets.sh)
+  ansible.builtin.command:
+    cmd: "./scripts/seal-secrets.sh {{ env_name }} {{ org_id }} {{ env_name }}"
+    chdir: /opt/Deploiment
+  environment:
+    # Context named after the environment by phase 3 (k8s_instance_link).
+    KUBECONFIG: "{{ instance_kubeconfig }}"
+    RESEND_API_KEY: "{{ resolved_secrets.resend_api_key }}"
+    S3_ACCESS_KEY: "{{ resolved_secrets.s3_access_key }}"
+    S3_SECRET_KEY: "{{ resolved_secrets.s3_secret_key }}"
+    AWS_ACCESS_KEY_ID: "{{ resolved_secrets.backup_access_key_id }}"
+    AWS_SECRET_ACCESS_KEY: "{{ resolved_secrets.backup_secret_access_key }}"
+    GHCR_USER: "{{ ghcr_seal_user }}"
+    GHCR_TOKEN: "{{ ghcr_seal_token }}"
+  delegate_to: "{{ argocd_host }}"
+  register: seal_run
+  changed_when: seal_run.rc == 0
+  failed_when: false
+  # The environment holds the secrets; the script output does not.
+  no_log: true
+
+- name: Show the seal-secrets.sh output
+  ansible.builtin.debug:
+    msg: "{{ seal_run.stdout_lines + seal_run.stderr_lines }}"
+
+- name: Fail when sealing failed
+  ansible.builtin.assert:
+    that: seal_run.rc == 0
+    fail_msg: "seal-secrets.sh exited with {{ seal_run.rc }}, see its output above."
+
+- name: Copy secrets.yaml back into the local Deploiment checkout
+  ansible.builtin.fetch:
+    src: "/opt/Deploiment/{{ instance_dir }}/secrets.yaml"
+    dest: "{{ deploiment_local_path }}/{{ instance_dir }}/secrets.yaml"
+    flat: true
+  delegate_to: "{{ argocd_host }}"
+
+# --- Sealing key backup ------------------------------------------------------
+# Losing this key makes every committed secrets.yaml of the instance
+# undecryptable after a reinstall.
+
+- name: Read the instance sealing key
+  ansible.builtin.command: >
+    kubectl --kubeconfig {{ instance_kubeconfig }} -n kube-system get secret
+    -l sealedsecrets.bitnami.com/sealed-secrets-key -o yaml
+  delegate_to: "{{ argocd_host }}"
+  register: sealing_key
+  changed_when: false
+  no_log: true
+
+- name: Create the local sealing key directory
+  ansible.builtin.file:
+    path: "{{ sealing_keys_dir }}"
+    state: directory
+    mode: "0700"
+  delegate_to: localhost
+  become: false
+
+- name: Back up the sealing key on the workstation
+  ansible.builtin.copy:
+    content: "{{ sealing_key.stdout }}\n"
+    dest: "{{ sealing_keys_dir }}/{{ org_id }}-{{ env_name }}.yaml"
+    mode: "0600"
+  delegate_to: localhost
+  become: false
+  no_log: true
+
+# --- Summary -------------------------------------------------------------------
+
+- name: Missing external secrets
+  ansible.builtin.debug:
+    msg: "{{ inventory_hostname }}: {{ item }} is empty, see the seal-secrets.sh output above."
+  loop: >-
+    {{ ['resend_api_key', 's3_access_key', 's3_secret_key']
+       | reject('in', on_cluster | dict2items | selectattr('value') | map(attribute='key') | list)
+       | select('in', resolved_secrets | dict2items | rejectattr('value') | map(attribute='key') | list)
+       | list }}
+
+- name: Summary
+  ansible.builtin.debug:
+    msg:
+      - "Secrets of {{ org_id }}/{{ env_name }} sealed."
+      - "Written: {{ deploiment_local_path }}/{{ instance_dir }}/secrets.yaml"
+      - "Sealing key: {{ sealing_keys_dir }}/{{ org_id }}-{{ env_name }}.yaml (store it in the team vault)"
+      - "Argo CD deploys them once pushed to {{ deploiment_repo_branch }}:"
+      - "  cd {{ deploiment_local_path }} && git add {{ instance_dir }}/secrets.yaml && git commit -m 'chore({{ env_name }}): seal secrets' && git push"

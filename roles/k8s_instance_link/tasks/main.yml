@@ -30,15 +30,31 @@
       '{{ org_id }}_argocd'. Trouvé :
       {{ groups[org_group ~ '_argocd'] | default([]) | length }}.
 
-- name: Vérifier que l'environnement existe dans le dépôt Deploiment
+- name: Check that env_name is set
   ansible.builtin.assert:
     that:
       - env_name is defined
       - env_name | length > 0
     fail_msg: >-
-      La variable `env_name` doit être définie pour {{ inventory_hostname }} et
-      correspondre à un dossier clusters/{{ org_id }}/instances/<env_name>/
-      du dépôt Deploiment.
+      `env_name` must be set for {{ inventory_hostname }} and match a folder
+      clusters/{{ org_id }}/instances/<env_name>/ of the Deploiment repo.
+
+# The instances ApplicationSet only creates an Application for folders that
+# exist on the tracked branch: without one, the instance is registered but
+# nothing is ever deployed on it, with no error anywhere.
+- name: Check that the instance values exist on the tracked Deploiment branch
+  ansible.builtin.stat:
+    path: "/opt/Deploiment/clusters/{{ org_id }}/instances/{{ env_name }}/values.yaml"
+  delegate_to: "{{ argocd_host }}"
+  register: instance_values
+
+- name: Fail when the instance has no values.yaml
+  ansible.builtin.assert:
+    that: instance_values.stat.exists
+    fail_msg: >-
+      clusters/{{ org_id }}/instances/{{ env_name }}/values.yaml is missing on
+      branch {{ deploiment_repo_branch }} of {{ deploiment_repo_url }}. Create
+      and push it, then re-run site.yml (phase 2 refreshes the checkout).
 
 # --- Récupération du kubeconfig de l'instance ---------------------------------
 
@@ -81,12 +97,13 @@
   delay: 6
   until: instance_readyz.rc == 0
 
-- name: Vérifier si le cluster est déjà enregistré
+# Each name is decoded on its own: piping all of them to a single `base64 -d`
+# breaks as soon as one of them carries padding.
+- name: Check whether the cluster is already registered
   ansible.builtin.shell: |
     set -o pipefail
-    kubectl -n argocd get secrets -l argocd.argoproj.io/secret-type=cluster \
-      -o jsonpath='{range .items[*]}{.data.name}{"\n"}{end}' \
-      | base64 -d 2>/dev/null | grep -Fx '{{ env_name }}' || true
+    kubectl -n argocd get secrets -l argocd.argoproj.io/secret-type=cluster -o json \
+      | jq -r '.items[].data.name | @base64d' | grep -Fx '{{ env_name }}' || true
   args:
     executable: /bin/bash
   delegate_to: "{{ argocd_host }}"
@@ -134,7 +151,4 @@
       - "{{ inventory_hostname }} est reliée à l'Argo CD de {{ org_id }}."
       - "Nom du cluster dans Argo CD : {{ env_name }} (via {{ wg_ip }}:6443)"
       - "Values attendues : clusters/{{ org_id }}/instances/{{ env_name }}/values.yaml"
-      - ""
-      - "Étape suivante — SANS elle, les pods resteront en CreateContainerConfigError :"
-      - "  ./scripts/seal-secrets.sh <contexte> {{ org_id }} {{ env_name }}"
-      - "  git add clusters/{{ org_id }}/instances/{{ env_name }}/secrets.yaml && git commit && git push"
+      - "Secrets: phase 4 (role k8s_instance_secrets) seals them next."

@@ -6,9 +6,6 @@ deploiment_repo_url: "https://github.com/mairie360/Deploiment.git"
 # évite le « je pousse mais rien ne change ».
 deploiment_repo_branch: "main"
 
-# Version du chart publié en OCI, consommée par l'ApplicationSet.
-chart_version: "0.2.0"
-
 # Versions épinglées. Les montées passent par une PR, jamais par une exécution
 # de playbook qui prendrait « la dernière ».
 k3s_channel: "v1.31"
@@ -34,3 +31,20 @@ org_group: "{{ org_id | replace('-', '_') }}"
 cilium_version: "1.20.2"
 cilium_cli_version: "v0.20.0"
 hubble_cli_version: "v1.19.4"
+
+# kubeseal client, installed on each Argo CD machine (role
+# k8s_instance_secrets). Matches the appVersion of the sealed-secrets chart
+# pinned in Deploiment/bootstrap/appsets/sealed-secrets-appset.yaml (2.17.3).
+kubeseal_version: "0.30.0"
+
+# GHCR pull credentials: argocd/ghcr-secret (read by argocd-image-updater,
+# role k8s_argocd) and the ghcr-secret sealed into every instance (role
+# k8s_instance_secrets). Taken from GHCR_USER / GHCR_TOKEN, else kept from the
+# argocd/ghcr-secret already on the Argo CD machine, else prompted.
+ghcr_user: "{{ lookup('ansible.builtin.env', 'GHCR_USER') }}"
+ghcr_token: "{{ lookup('ansible.builtin.env', 'GHCR_TOKEN') }}"
+
+# Ask interactively for every secret that is neither provided nor already on
+# the cluster. Set to false in CI (-e secrets_prompt=false): missing secrets
+# are then only reported.
+secrets_prompt: true

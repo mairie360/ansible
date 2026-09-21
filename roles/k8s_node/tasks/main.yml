@@ -53,6 +53,20 @@
     interface: wg0
     direction: in
 
+# The Argo CD of the group drives each instance through its API server, over
+# the tunnel only (role k8s_instance_link registers https://<wg_ip>:6443).
+# Restricted to the Argo CD machine's tunnel IP: 6443 is cluster-admin access.
+- name: Allow the group's Argo CD to reach the API server through the tunnel
+  community.general.ufw:
+    rule: allow
+    port: "6443"
+    proto: tcp
+    interface: wg0
+    direction: in
+    from_ip: "{{ hostvars[groups[org_group ~ '_argocd'][0]].wg_ip }}"
+    comment: "k8s API from the group Argo CD"
+  when: inventory_hostname in groups[org_group ~ '_instances'] | default([])
+
 # Filet de sécurité : tant que WireGuard n'est pas monté ET validé, couper le
 # SSH public verrouillerait la machine. Le rôle `wireguard` retire cette règle
 # seulement après avoir confirmé que le tunnel fonctionne.
