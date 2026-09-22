@@ -112,6 +112,20 @@
   register: cluster_already
   changed_when: false
 
+# In --core mode the CLI looks for argocd-cm in the namespace of the current
+# kubeconfig context, and k3s.yaml points at `default`: give it a copy whose
+# context targets `argocd` (--port-forward-namespace has no effect here).
+- name: Prepare a kubeconfig for the argocd CLI (context namespace = argocd)
+  ansible.builtin.shell: |
+    set -o pipefail
+    cp /etc/rancher/k3s/k3s.yaml /root/.kube/argocd-cli.yaml
+    chmod 600 /root/.kube/argocd-cli.yaml
+    kubectl --kubeconfig /root/.kube/argocd-cli.yaml config set-context --current --namespace=argocd
+  args:
+    executable: /bin/bash
+  delegate_to: "{{ argocd_host }}"
+  changed_when: false
+
 - name: Enregistrer le cluster auprès de l'Argo CD du groupe
   ansible.builtin.command: >
     argocd cluster add {{ env_name }}
@@ -120,7 +134,7 @@
     --core --upsert --yes
   delegate_to: "{{ argocd_host }}"
   environment:
-    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+    KUBECONFIG: /root/.kube/argocd-cli.yaml
   when: cluster_already.stdout | trim != env_name
   changed_when: true
 
