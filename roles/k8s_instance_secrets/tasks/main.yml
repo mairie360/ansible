@@ -211,7 +211,7 @@
 
 - name: Seal the instance secrets (Deploiment/scripts/seal-secrets.sh)
   ansible.builtin.command:
-    cmd: "./scripts/seal-secrets.sh {{ env_name }} {{ org_id }} {{ env_name }}"
+    cmd: "./scripts/seal-secrets.sh {{ env_name }} {{ org_id }} {{ env_name }} {{ seal_extra_args }}"
     chdir: /opt/Deploiment
   environment:
     # Context named after the environment by phase 3 (k8s_instance_link).

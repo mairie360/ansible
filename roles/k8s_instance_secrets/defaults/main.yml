@@ -30,3 +30,9 @@ deploiment_local_path: "{{ playbook_dir }}/../../Deploiment"
 # Local backup of each instance's sealing key. Outside any git repository:
 # this key decrypts every committed secrets.yaml of the instance.
 sealing_keys_dir: "{{ lookup('ansible.builtin.env', 'HOME') }}/.mairie360/sealing-keys"
+
+# Extra arguments for seal-secrets.sh. Generated secrets are kept by default;
+# "--rotate-roles" regenerates only the API Postgres role passwords (applied
+# by the next Liquibase sync), "--rotate" regenerates everything (read the
+# warnings in scripts/seal-secrets.sh first: RESTIC_PASSWORD, superuser).
+seal_extra_args: ""
