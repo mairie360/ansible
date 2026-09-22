@@ -77,12 +77,31 @@ repository`), and the operation stayed pinned on the old SHA
 
 `playbooks/verify.yml` fails if an operation is still stuck (ComparisonError,
 or `Running` for more than `verify_stuck_sync_minutes`, 15 by default). To
-unblock it, on the Argo CD machine:
+unblock it, on the Argo CD machine (the kubeconfig is written by phase 3, with
+`argocd` as its default namespace):
 
 ```bash
-kubectl config set-context --current --namespace argocd
-argocd app terminate-op <env> --core
+sudo KUBECONFIG=/root/.kube/argocd-cli.yaml argocd app terminate-op <env> --core
 ```
+
+Migrating a group whose Applications are still multi-source (every group
+provisioned before MAIR-173): re-run `site.yml` on the whole group. The
+ApplicationSet is per group, so all its instances switch at once (there is no
+"dev first" here). Phase 2 carries the image tags written by
+argocd-image-updater over to the new layout, then:
+
+```bash
+# On the Argo CD machine: every instance Application is single-source...
+sudo kubectl -n argocd get applications.argoproj.io \
+  -o custom-columns='NAME:.metadata.name,SOURCE:.spec.source.path,SOURCES:.spec.sources[*].ref'
+# ...and still carries its image tags (not the values.yaml ones)
+sudo kubectl -n argocd get applications.argoproj.io <env> -o jsonpath='{.spec.source.helm.parameters}'
+
+ansible-playbook playbooks/verify.yml
+```
+
+Acceptance test: push a commit to `Deploiment` `main` while an instance is
+syncing, and check that it converges on the new commit on its own.
 
 ## Secrets
 
