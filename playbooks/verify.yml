@@ -63,8 +63,8 @@
         that: stuck_syncs.stdout | length == 0
         fail_msg: >-
           Stuck sync operation(s): {{ stuck_syncs.stdout_lines | join(' | ') }}.
-          On this machine, run `argocd app terminate-op <app> --core`
-          (with `kubectl config set-context --current --namespace argocd`),
+          On this machine, run
+          `sudo KUBECONFIG=/root/.kube/argocd-cli.yaml argocd app terminate-op <app> --core`,
           then let auto-sync pick up the latest commit.
 
     - name: Les instances du groupe sont bien enregistrées et étiquetées
