@@ -35,6 +35,38 @@
           - "'Unknown' not in apps.stdout"
         fail_msg: "Applications en erreur — voir la sortie ci-dessus."
 
+    # A sync operation that fails to generate its manifests does not end on
+    # its own: Argo CD retries it on the revision it pinned when it started
+    # (MAIR-173). Such an operation still reads "Running", so the status
+    # check above can miss it. Flag any operation stuck on a ComparisonError
+    # or running for longer than verify_stuck_sync_minutes.
+    - name: No Application stuck in a sync operation
+      ansible.builtin.shell: |
+        set -o pipefail
+        kubectl -n argocd get applications.argoproj.io -o json | jq -r --argjson max "$MAX_SECONDS" '
+          .items[]
+          | select(.status.operationState.phase == "Running")
+          | select(
+              any(.status.conditions[]?; .type == "ComparisonError")
+              or (now - (.status.operationState.startedAt | fromdateiso8601) > $max))
+          | "\(.metadata.name): \(.status.operationState.message // "")"'
+      args:
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+        MAX_SECONDS: "{{ (verify_stuck_sync_minutes | default(15) | int) * 60 }}"
+      register: stuck_syncs
+      changed_when: false
+
+    - name: Report stuck sync operations
+      ansible.builtin.assert:
+        that: stuck_syncs.stdout | length == 0
+        fail_msg: >-
+          Stuck sync operation(s): {{ stuck_syncs.stdout_lines | join(' | ') }}.
+          On this machine, run `argocd app terminate-op <app> --core`
+          (with `kubectl config set-context --current --namespace argocd`),
+          then let auto-sync pick up the latest commit.
+
     - name: Les instances du groupe sont bien enregistrées et étiquetées
       ansible.builtin.shell: |
         set -o pipefail

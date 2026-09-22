@@ -65,6 +65,25 @@ git add clusters/<org>/instances/<env>/secrets.yaml && git commit && git push
 Until that file is pushed, the pods stay in `CreateContainerConfigError`:
 expected, not a bug.
 
+### Stuck sync operation
+
+The instances ApplicationSet (`roles/k8s_argocd/templates/instances-appset.yaml.j2`)
+is single-source on purpose: chart and values are read from the same
+`Deploiment` revision, through a path relative to the chart. The former
+multi-source layout (chart + `ref: values`) broke whenever a commit landed on
+`main` during a sync (`cannot reference a different revision of the same
+repository`), and the operation stayed pinned on the old SHA
+(argoproj/argo-cd#29716). Do not go back to it.
+
+`playbooks/verify.yml` fails if an operation is still stuck (ComparisonError,
+or `Running` for more than `verify_stuck_sync_minutes`, 15 by default). To
+unblock it, on the Argo CD machine:
+
+```bash
+kubectl config set-context --current --namespace argocd
+argocd app terminate-op <env> --core
+```
+
 ## Secrets
 
 Phase 4 (`playbooks/secrets.yml`, also imported by `site.yml`) runs
