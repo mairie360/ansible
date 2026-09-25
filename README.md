@@ -28,13 +28,44 @@ réseau vers un autre : l'isolation vient de la topologie.
 | 1 | `k8s_node` | all | Hardening, firewall (6443 only from the group's Argo CD, over `wg0`), k3s (Traefik disabled, ServiceLB on), Cilium CNI + Hubble |
 | 1b | `wireguard` | all | Group tunnel: the Argo CD machine listens, the instances connect to it |
 | 2 | `k8s_argocd` | `*_argocd` | Argo CD + `platform-app.yaml` + the group's ApplicationSet, `argocd/ghcr-secret`, one `ImageUpdater` per instance |
-| 3 | `k8s_instance_link` | `*_instances` | `argocd cluster add` on the WireGuard IP + labels |
+| 3 | `k8s_instance_link` | `*_instances` | `argocd cluster add` on the WireGuard IP + labels (`mairie360.fr/role`, `org`, `env`, `ingress`) |
 | 4 | `k8s_instance_secrets` | `*_instances` | Seals the instance secrets with `seal-secrets.sh`, asks for the missing external ones, copies `secrets.yaml` back to the local `Deploiment` checkout |
 
-Le rôle `k8s_argocd` n'installe **ni** cert-manager, **ni** ingress-nginx,
-**ni** de ClusterIssuer : c'est Argo CD qui les déploie sur les instances,
-depuis `Deploiment`. Les installer ici créerait des doublons en conflit
-(versions différentes, CRD concurrentes).
+The `k8s_argocd` role installs **neither** cert-manager, **nor** the ingress
+controller, **nor** a ClusterIssuer: Argo CD deploys them on the instances,
+from `Deploiment`. Installing them here would create conflicting duplicates
+(different versions, competing CRDs). k3s's bundled Traefik is disabled for
+the same reason: the controller version is pinned in `Deploiment`.
+
+## Ingress controller per instance (MAIR-260)
+
+ingress-nginx was retired upstream in March 2026; `Deploiment` replaces it
+with a pinned Traefik (`bootstrap/appsets/traefik-appset.yaml`,
+`docs/adr/0001-replace-ingress-nginx.md`). Only one controller can own ports
+80/443 of a machine (ServiceLB), so each instance machine says which one it
+runs with `ingress_controller` (`nginx` by default, set in
+`inventory/group_vars/all.yml`). Phase 3 writes it as the Argo CD cluster
+label `mairie360.fr/ingress`: the Traefik AppSet takes `traefik`, the
+ingress-nginx AppSet everything else.
+
+### Switching an instance to Traefik
+
+Full procedure, verification and rollback: `docs/adr/0001-replace-ingress-nginx.md`
+in `Deploiment`. The ansible part:
+
+```bash
+# 1. inventory/hosts.yml, on the instance host (dev first):
+#      mairie360-dev:
+#        ...
+#        ingress_controller: traefik
+# 2. Re-apply the cluster labels only (no other task runs):
+ansible-playbook playbooks/site.yml --limit 'mairie360_argocd:mairie360_instances' --tags labels
+```
+
+Argo CD then deletes ingress-nginx from that machine and installs Traefik.
+Flip `global.ingressController` in the instance's `values.yaml` in
+`Deploiment` right after. Rollback: set `ingress_controller: nginx` again (or
+remove it), same command, and revert the values.
 
 ## Usage
 
@@ -159,7 +190,7 @@ Versions are pinned in `inventory/group_vars/all.yml` and bumped through a PR:
 
 | Variable | Pin | Why this one |
 |---|---|---|
-| `k3s_version` | `v1.35.8+k3s1` | Kubernetes 1.35 is supported upstream until 2027-02-28 and is the only minor inside every matrix of the stack: Cilium 1.20 (1.33-1.36), Argo CD 3.4 (1.32-1.35), cert-manager 1.21 (1.33-1.36) and ingress-nginx controller 1.15 (1.31-1.35), both deployed by `Deploiment` |
+| `k3s_version` | `v1.35.8+k3s1` | Kubernetes 1.35 is supported upstream until 2027-02-28 and is the only minor inside every matrix of the stack: Cilium 1.20 (1.33-1.36), Argo CD 3.4 (1.32-1.35), cert-manager 1.21 (1.33-1.36), ingress-nginx controller 1.15 (1.31-1.35) and Traefik 3.7 (>= 1.25), all deployed by `Deploiment` |
 | `argocd_version` | `v3.4.9` | Supported 3.x line. 3.5 moves to Helm 4 and is left for a later bump |
 
 **k3s.** `k8s_node` installs the exact `k3s_version` with the `install.sh` of

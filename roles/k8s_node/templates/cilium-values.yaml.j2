@@ -17,8 +17,8 @@ ipam:
     clusterPoolIPv4PodCIDRList:
       - "{{ k3s_cluster_cidr }}"
 
-# k3s keeps kube-proxy and ServiceLB (ServiceLB is what binds ingress-nginx
-# to ports 80/443 of the machine); Cilium does not replace kube-proxy.
+# k3s keeps kube-proxy and ServiceLB (ServiceLB is what binds the ingress
+# controller, ingress-nginx or Traefik, to ports 80/443 of the machine); Cilium does not replace kube-proxy.
 kubeProxyReplacement: false
 
 hubble:

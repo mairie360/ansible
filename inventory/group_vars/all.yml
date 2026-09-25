@@ -20,6 +20,16 @@ k3s_version: "v1.35.8+k3s1"
 # for a later bump: it moves to Helm 4.
 argocd_version: "v3.4.9"
 
+# Ingress controller of an instance machine (MAIR-260): "nginx" (ingress-nginx,
+# retired upstream in March 2026) or "traefik". Written by k8s_instance_link
+# as the Argo CD cluster label `mairie360.fr/ingress`; the Deploiment AppSets
+# install Traefik where it is "traefik" and ingress-nginx everywhere else, so
+# only one controller owns ports 80/443. Override it per host in
+# inventory/hosts.yml (dev first), together with `global.ingressController`
+# in Deploiment's clusters/<org>/instances/<env>/values.yaml, then apply it
+# with `--tags labels` (README, "Switching an instance to Traefik").
+ingress_controller: "nginx"
+
 # Réseau interne k3s : sans ces autorisations UFW, le pare-feu casse le trafic
 # entre pods (CoreDNS en CrashLoop, services injoignables).
 k3s_cluster_cidr: "10.42.0.0/16"

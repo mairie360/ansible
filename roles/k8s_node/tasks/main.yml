@@ -118,9 +118,12 @@
     dest: /etc/rancher/k3s/config.yaml
     mode: "0644"
     content: |
-      # Traefik disabled: ingress-nginx is the only ingress controller,
-      # installed by Argo CD (bootstrap/appsets/ingress-nginx-appset.yaml).
-      # Two controllers would fight over ports 80/443.
+      # k3s's bundled Traefik disabled: the ingress controller (ingress-nginx
+      # or, since MAIR-260, Traefik) is installed by Argo CD from Deploiment
+      # (bootstrap/appsets/*), with its version pinned there instead of
+      # following the k3s release. Which one runs is the cluster label
+      # mairie360.fr/ingress (var ingress_controller). Two controllers
+      # would fight over ports 80/443.
       #
       # flannel and the built-in network policy controller disabled: Cilium
       # is the CNI (tasks/cilium.yml). It enforces the NetworkPolicies itself
@@ -128,7 +131,8 @@
       # installed the node stays NotReady: expected.
       #
       # ServiceLB stays ON: on a single node it is what binds the
-      # LoadBalancer Service of ingress-nginx to ports 80/443 of the machine.
+      # LoadBalancer Service of the ingress controller to ports 80/443 of
+      # the machine.
       # kube-proxy stays ON too: Cilium runs without kube-proxy replacement.
       disable:
         - traefik
