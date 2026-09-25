@@ -150,7 +150,49 @@ Migrating a machine provisioned with flannel: re-run `site.yml`. k3s restarts
 with flannel disabled, Cilium is installed, every pod is restarted once onto
 Cilium (a few minutes of downtime) and the flannel interfaces are removed.
 Do `dev` first. Pinned versions: `cilium_version`, `cilium_cli_version`,
-`hubble_cli_version` in `inventory/group_vars/all.yml`.
+`hubble_cli_version` in `inventory/group_vars/all.yml` (see "Upgrading k3s and
+Argo CD" for `k3s_version` / `argocd_version`).
+
+## Upgrading k3s and Argo CD
+
+Versions are pinned in `inventory/group_vars/all.yml` and bumped through a PR:
+
+| Variable | Pin | Why this one |
+|---|---|---|
+| `k3s_version` | `v1.35.8+k3s1` | Kubernetes 1.35 is supported upstream until 2027-02-28 and is the only minor inside every matrix of the stack: Cilium 1.20 (1.33-1.36), Argo CD 3.4 (1.32-1.35), cert-manager 1.21 (1.33-1.36) and ingress-nginx controller 1.15 (1.31-1.35), both deployed by `Deploiment` |
+| `argocd_version` | `v3.4.9` | Supported 3.x line. 3.5 moves to Helm 4 and is left for a later bump |
+
+**k3s.** `k8s_node` installs the exact `k3s_version` with the `install.sh` of
+that tag (the installer checks the binary's sha256). On every run it compares
+`k3s --version` with the pin and re-runs the installer only when they differ,
+**one machine at a time** (`throttle: 1`): each machine is a single-node
+cluster, so an upgrade restarts all its pods for a minute or two.
+
+Kubernetes never downgrades and upgrades **one minor at a time**: the role
+refuses a pin more than one minor above the installed version. From an older
+machine, go through every minor, latest patch of each (`update.k3s.io/v1-release/channels`
+lists them), whole groups, `dev` first:
+
+```bash
+# e.g. from v1.31: 1.32 -> 1.33 -> 1.34 -> 1.35 (the pin)
+for v in v1.32.13+k3s1 v1.33.13+k3s2 v1.34.11+k3s1; do
+  ansible-playbook playbooks/site.yml --limit 'mairie360_argocd:mairie360_instances' -e k3s_version=$v || break
+done
+ansible-playbook playbooks/site.yml --limit 'mairie360_argocd:mairie360_instances'
+ansible-playbook playbooks/verify.yml
+```
+
+**Argo CD.** Phase 2 re-applies `install.yaml` of `argocd_version` with
+server-side apply (required since 3.3) and replaces the `argocd` CLI when its
+checksum differs from the pinned release. Before crossing a minor, read the
+upstream notes (`docs/operator-manual/upgrading/` in `argoproj/argo-cd`). The
+2.13 -> 3.4 jump changes, among others: annotation-based resource tracking by
+default (every Application re-syncs once and resources get the
+`argocd.argoproj.io/tracking-id` annotation), `logs, get` RBAC enforced,
+repositories no longer read from `argocd-cm`, more resources excluded by
+default (`Endpoints`, `Lease`, `CiliumIdentity`, `CiliumEndpoint`; not
+`CiliumNetworkPolicy`). None of those is used by
+`Deploiment` today.
 
 ## Conventions qui comptent
 
