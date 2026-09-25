@@ -140,6 +140,7 @@
     - secrets_prompt | bool
     - ghcr_resolved_token | length == 0
     - ghcr_user_prompt.user_input | default('') | length > 0
+  no_log: true
 
 - name: Keep the prompted GHCR credentials
   ansible.builtin.set_fact:
@@ -204,27 +205,29 @@
   changed_when: "'created' in imageupdaters_apply.stdout or 'configured' in imageupdaters_apply.stdout"
   when: groups[org_group ~ '_instances'] | default([]) | length > 0
 
-# --- Sortie -------------------------------------------------------------------
+# --- Output ------------------------------------------------------------------
+# The admin password is never read into a variable nor printed: it would land
+# in the terminal and in every saved run log. Only say whether the initial
+# secret still exists and how to read it on the machine.
 
-- name: Récupérer le mot de passe admin initial
-  ansible.builtin.shell: |
-    set -o pipefail
-    kubectl -n argocd get secret argocd-initial-admin-secret \
-      -o jsonpath='{.data.password}' | base64 -d
-  args:
-    executable: /bin/bash
+- name: Check whether the initial admin secret still exists
+  ansible.builtin.command: kubectl -n argocd get secret argocd-initial-admin-secret -o name
   environment:
     KUBECONFIG: /etc/rancher/k3s/k3s.yaml
-  register: argocd_password
+  register: argocd_initial_secret
   changed_when: false
   failed_when: false
 
-- name: Afficher les accès
+- name: Show how to reach Argo CD
   ansible.builtin.debug:
     msg:
-      - "Argo CD du groupe {{ org_id }} installé sur {{ inventory_hostname }}."
-      - "Mot de passe admin : {{ argocd_password.stdout | default('(déjà changé ou secret supprimé)') }}"
-      - "Accès : pas d'Ingress public. Argo CD détient les droits d'admin sur"
-      - "les instances du groupe — il se joint par le VPN :"
+      - "Argo CD of group {{ org_id }} installed on {{ inventory_hostname }}."
+      - "Initial admin password: {{ 'not printed, read it on the machine with:'
+            if argocd_initial_secret.rc == 0
+            else 'initial secret already deleted, use the password set after the first login.' }}"
+      - "  sudo kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d"
+      - "Then change it (argocd account update-password) and delete argocd-initial-admin-secret."
+      - "Access: no public Ingress. Argo CD holds admin rights on the instances"
+      - "of the group, it is reached through the VPN:"
       - "  ssh -L 8080:localhost:8080 {{ ansible_user }}@{{ wg_ip }}"
       - "  kubectl -n argocd port-forward svc/argocd-server 8080:443"
