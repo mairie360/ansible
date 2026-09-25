@@ -6,10 +6,19 @@ deploiment_repo_url: "https://github.com/mairie360/Deploiment.git"
 # évite le « je pousse mais rien ne change ».
 deploiment_repo_branch: "main"
 
-# Versions épinglées. Les montées passent par une PR, jamais par une exécution
-# de playbook qui prendrait « la dernière ».
-k3s_channel: "v1.31"
-argocd_version: "v2.13.2"
+# Pinned versions. Bumps go through a PR, never through a playbook run that
+# would pick "the latest".
+#
+# k3s: exact release (INSTALL_K3S_VERSION), installed with the install.sh of
+# that same tag. Re-running site.yml after a bump upgrades the machines, one
+# at a time (role k8s_node). Kubernetes minors cannot be skipped: go through
+# every minor in between (README, "Upgrading k3s").
+# v1.35: supported upstream until 2027-02-28, in the tested matrix of Cilium
+# 1.20 and Argo CD 3.4.
+k3s_version: "v1.35.8+k3s1"
+# Argo CD 3.4 (supported line, tested on Kubernetes 1.32-1.35). 3.5 is left
+# for a later bump: it moves to Helm 4.
+argocd_version: "v3.4.9"
 
 # Réseau interne k3s : sans ces autorisations UFW, le pare-feu casse le trafic
 # entre pods (CoreDNS en CrashLoop, services injoignables).
