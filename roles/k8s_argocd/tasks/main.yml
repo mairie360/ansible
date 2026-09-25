@@ -4,11 +4,12 @@
 #
 # S'applique à UNE machine par groupe (`<org>_argocd`).
 #
-# Ce rôle installe Argo CD et l'amorce. Il n'installe NI cert-manager, NI
-# ingress-nginx, NI de ClusterIssuer : tout cela est déployé par Argo CD sur
-# les instances, depuis le dépôt Deploiment. Installer ces composants ici
-# créerait un doublon en conflit avec les AppSets (versions différentes,
-# CRD concurrentes) — c'est exactement ce qui posait problème avant.
+# This role installs Argo CD and bootstraps it. It installs NEITHER
+# cert-manager, NOR the ingress controller (ingress-nginx or Traefik), NOR a
+# ClusterIssuer: Argo CD deploys all of them on the instances, from the
+# Deploiment repo. Installing them here would create a duplicate conflicting
+# with the AppSets (different versions, competing CRDs), which is exactly
+# what used to go wrong.
 # =============================================================================
 
 - name: Installer les dépendances du rôle
