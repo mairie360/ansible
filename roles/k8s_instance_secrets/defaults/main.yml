@@ -9,11 +9,21 @@
 #            s3_secret_key: xxx
 #            backup_access_key_id: xxx        # only when backup.enabled
 #            backup_secret_access_key: xxx
+#            admin_email: admin@example.org   # MAIR-170, mandatory
 #   2. the environment variable of the controller (same for every instance):
 #      RESEND_API_KEY, S3_ACCESS_KEY, S3_SECRET_KEY, AWS_ACCESS_KEY_ID,
-#      AWS_SECRET_ACCESS_KEY;
+#      AWS_SECRET_ACCESS_KEY, ADMIN_EMAIL;
 #   3. the value already sealed on the instance (kept by seal-secrets.sh);
 #   4. an interactive prompt (secrets_prompt, inventory/group_vars/all.yml).
+#
+# admin_email (MAIR-170, the town hall administrator account's e-mail) is
+# different from the others: it is prompted in clear, not hidden, has no
+# step 3 (this role does not check what the instance already has), and is
+# mandatory — an empty value fails the play instead of being sealed empty,
+# so no instance starts on Database's public template admin account by
+# accident. seal-secrets.sh generates the matching ADMIN_PASSWORD itself and
+# keeps it once set; this role has no way yet to read that generated value
+# back to deposit it on the workstation (see tasks/main.yml).
 instance_secrets: {}
 
 instance_secret_env:
@@ -22,6 +32,7 @@ instance_secret_env:
   s3_secret_key: S3_SECRET_KEY
   backup_access_key_id: AWS_ACCESS_KEY_ID
   backup_secret_access_key: AWS_SECRET_ACCESS_KEY
+  admin_email: ADMIN_EMAIL
 
 # Where the generated secrets.yaml is copied back: the Deploiment checkout
 # next to this repo (Devops/ansible + Devops/Deploiment).

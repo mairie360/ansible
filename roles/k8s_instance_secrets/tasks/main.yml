@@ -11,6 +11,8 @@
 #      (it needs the mairie360.fr/role=instance label set by phase 3);
 #   2. resolves the external secrets (Resend, S3, backup bucket, GHCR) from
 #      variables, else keeps what the instance already has, else prompts;
+#      the admin account e-mail (MAIR-170) is resolved the same way but is
+#      mandatory: the play fails if it is still empty after the prompt;
 #   3. runs seal-secrets.sh (generated secrets — JWT, Postgres, Redis — are
 #      kept when they already exist on the instance, never rotated here);
 #   4. copies secrets.yaml back into the local Deploiment checkout, and the
@@ -172,6 +174,38 @@
   when: item.user_input | default('') | length > 0
   no_log: true
 
+# --- Admin account e-mail (MAIR-170) ------------------------------------------
+# Unlike the secrets above: prompted in clear (not hidden, not sensitive) and
+# mandatory — no instance should keep Database's public template admin
+# account by accident, so an empty value here fails the play instead of being
+# sealed empty. seal-secrets.sh still keeps whatever ADMIN_EMAIL it already
+# has sealed when run by hand without this role, but this role never checks
+# that: it always resolves its own value or stops.
+
+- name: Ask for the admin account e-mail
+  ansible.builtin.pause:
+    prompt: "[{{ inventory_hostname }}] Town hall administrator e-mail (ADMIN_EMAIL)"
+  register: admin_email_prompt
+  when:
+    - secrets_prompt | bool
+    - resolved_secrets.admin_email | length == 0
+
+- name: Keep the prompted admin account e-mail
+  ansible.builtin.set_fact:
+    resolved_secrets: "{{ resolved_secrets | combine({'admin_email': admin_email_prompt.user_input}) }}"
+  when:
+    - admin_email_prompt is not skipped
+    - admin_email_prompt.user_input | length > 0
+
+- name: Fail when the admin account e-mail is missing
+  ansible.builtin.assert:
+    that: resolved_secrets.admin_email | length > 0
+    fail_msg: >-
+      No admin account e-mail for {{ inventory_hostname }} (MAIR-170): set
+      instance_secrets[{{ inventory_hostname }}].admin_email, export
+      ADMIN_EMAIL, or answer the prompt above. seal-secrets.sh needs it to
+      replace Database's public template admin account.
+
 # --- GHCR pull secret ----------------------------------------------------------
 # seal-secrets.sh only writes ghcr-secret when GHCR_TOKEN is set: without it,
 # a ghcr-secret sealed earlier would disappear from secrets.yaml and be pruned.
@@ -221,6 +255,7 @@
     S3_SECRET_KEY: "{{ resolved_secrets.s3_secret_key }}"
     AWS_ACCESS_KEY_ID: "{{ resolved_secrets.backup_access_key_id }}"
     AWS_SECRET_ACCESS_KEY: "{{ resolved_secrets.backup_secret_access_key }}"
+    ADMIN_EMAIL: "{{ resolved_secrets.admin_email }}"
     GHCR_USER: "{{ ghcr_seal_user }}"
     GHCR_TOKEN: "{{ ghcr_seal_token }}"
   delegate_to: "{{ argocd_host }}"
@@ -245,6 +280,16 @@
     dest: "{{ deploiment_local_path }}/{{ instance_dir }}/secrets.yaml"
     flat: true
   delegate_to: "{{ argocd_host }}"
+
+# TODO (MAIR-170): seal-secrets.sh generates ADMIN_PASSWORD itself and only
+# ever prints a "généré" marker for it, never the value — it is sealed
+# straight from its own shell variable and never appears in seal_run.stdout
+# or on the instance (the cluster only gets it once secrets.yaml is committed
+# and Argo CD syncs it, well after this role returns). There is currently no
+# way for this role to read the generated value back to deposit it at
+# ~/.mairie360/admin-<org>-<env>.txt (mode 600) as the acceptance criteria of
+# MAIR-170 ask. Wire this up once seal-secrets.sh surfaces the value on a
+# channel this role can read without also showing it in the debug task above.
 
 # --- Sealing key backup ------------------------------------------------------
 # Losing this key makes every committed secrets.yaml of the instance
@@ -291,6 +336,7 @@
   ansible.builtin.debug:
     msg:
       - "Secrets of {{ org_id }}/{{ env_name }} sealed."
+      - "Admin account e-mail: {{ resolved_secrets.admin_email }} (MAIR-170; the generated ADMIN_PASSWORD is not printed here, see the TODO in this role)"
       - "Written: {{ deploiment_local_path }}/{{ instance_dir }}/secrets.yaml"
       - "Sealing key: {{ sealing_keys_dir }}/{{ org_id }}-{{ env_name }}.yaml (store it in the team vault)"
       - "Argo CD deploys them once pushed to {{ deploiment_repo_branch }}:"
