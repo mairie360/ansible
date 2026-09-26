@@ -62,6 +62,8 @@
   ansible.builtin.slurp:
     src: /etc/rancher/k3s/k3s.yaml
   register: instance_kubeconfig
+  # The k3s kubeconfig holds the cluster-admin client key.
+  no_log: true
 
 - name: Préparer un kubeconfig pointant sur l'IP WireGuard
   ansible.builtin.set_fact:
@@ -74,6 +76,7 @@
          | replace('cluster: default', 'cluster: ' ~ env_name)
          | replace('user: default', 'user: ' ~ env_name)
          | replace('current-context: default', 'current-context: ' ~ env_name) }}
+  no_log: true
 
 - name: Déposer le kubeconfig sur la machine Argo CD
   ansible.builtin.copy:
@@ -83,6 +86,8 @@
     group: root
     mode: "0600"
   delegate_to: "{{ argocd_host }}"
+  diff: false
+  no_log: true
 
 # --- Enregistrement -----------------------------------------------------------
 

@@ -1,3 +1,8 @@
-logs
-secrets.yml
+# Run logs (`ansible-playbook … | tee logs/<run>.log`): they may hold command
+# output from the machines, never commit them.
+/logs/
+*.log
+# Vault file passed with -e @secrets.yml (root only: playbooks/secrets.yml is
+# the phase 4 playbook and must stay tracked).
+/secrets.yml
 .env
