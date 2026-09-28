@@ -20,6 +20,18 @@
 - name: Déterminer la machine Argo CD du groupe
   ansible.builtin.set_fact:
     argocd_host: "{{ groups[org_group ~ '_argocd'][0] }}"
+  tags: [labels]
+
+# MAIR-260: a typo here would silently leave the machine on ingress-nginx
+# (the AppSet treats anything but "traefik" as nginx).
+- name: Check ingress_controller
+  ansible.builtin.assert:
+    that:
+      - ingress_controller in ['nginx', 'traefik']
+    fail_msg: >-
+      ingress_controller must be "nginx" or "traefik" for
+      {{ inventory_hostname }}, got "{{ ingress_controller }}".
+  tags: [labels]
 
 - name: Vérifier que le groupe a bien une machine Argo CD
   ansible.builtin.assert:
@@ -143,9 +155,14 @@
   when: cluster_already.stdout | trim != env_name
   changed_when: true
 
-# Ce label est ce qui distingue une instance de la machine Argo CD. Les AppSets
-# du socle (sealed-secrets, cert-manager, ingress-nginx, cluster-issuer) le
-# sélectionnent : sans lui, ils ne déploieraient rien sur cette instance.
+# These labels are what tell an instance apart from the Argo CD machine. The
+# platform AppSets (sealed-secrets, cert-manager, cluster-issuer, ingress)
+# select on mairie360.fr/role: without it they deploy nothing on this
+# instance. mairie360.fr/ingress (MAIR-260) picks the ingress controller:
+# Deploiment's traefik-appset.yaml takes "traefik", ingress-nginx-appset.yaml
+# everything else. Flipping it makes Argo CD delete one controller and
+# install the other (both AppSets carry the resources finalizer).
+# Tagged `labels`: `site.yml --tags labels` re-applies them alone.
 - name: Étiqueter le cluster comme instance du groupe
   ansible.builtin.shell: |
     set -o pipefail
@@ -155,7 +172,8 @@
     kubectl -n argocd label secret "$SECRET" \
       mairie360.fr/role=instance \
       mairie360.fr/org={{ org_id }} \
-      mairie360.fr/env={{ env_name }} --overwrite
+      mairie360.fr/env={{ env_name }} \
+      mairie360.fr/ingress={{ ingress_controller }} --overwrite
   args:
     executable: /bin/bash
   delegate_to: "{{ argocd_host }}"
@@ -163,6 +181,7 @@
     KUBECONFIG: /etc/rancher/k3s/k3s.yaml
   register: label_result
   changed_when: "'labeled' in label_result.stdout"
+  tags: [labels]
 
 - name: Récapitulatif
   ansible.builtin.debug:
