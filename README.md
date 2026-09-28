@@ -65,6 +65,44 @@ git add clusters/<org>/instances/<env>/secrets.yaml && git commit && git push
 Until that file is pushed, the pods stay in `CreateContainerConfigError`:
 expected, not a bug.
 
+### Stuck sync operation
+
+The instances ApplicationSet (`roles/k8s_argocd/templates/instances-appset.yaml.j2`)
+is single-source on purpose: chart and values are read from the same
+`Deploiment` revision, through a path relative to the chart. The former
+multi-source layout (chart + `ref: values`) broke whenever a commit landed on
+`main` during a sync (`cannot reference a different revision of the same
+repository`), and the operation stayed pinned on the old SHA
+(argoproj/argo-cd#29716). Do not go back to it.
+
+`playbooks/verify.yml` fails if an operation is still stuck (ComparisonError,
+or `Running` for more than `verify_stuck_sync_minutes`, 15 by default). To
+unblock it, on the Argo CD machine (the kubeconfig is written by phase 3, with
+`argocd` as its default namespace):
+
+```bash
+sudo KUBECONFIG=/root/.kube/argocd-cli.yaml argocd app terminate-op <env> --core
+```
+
+Migrating a group whose Applications are still multi-source (every group
+provisioned before MAIR-173): re-run `site.yml` on the whole group. The
+ApplicationSet is per group, so all its instances switch at once (there is no
+"dev first" here). Phase 2 carries the image tags written by
+argocd-image-updater over to the new layout, then:
+
+```bash
+# On the Argo CD machine: every instance Application is single-source...
+sudo kubectl -n argocd get applications.argoproj.io \
+  -o custom-columns='NAME:.metadata.name,SOURCE:.spec.source.path,SOURCES:.spec.sources[*].ref'
+# ...and still carries its image tags (not the values.yaml ones)
+sudo kubectl -n argocd get applications.argoproj.io <env> -o jsonpath='{.spec.source.helm.parameters}'
+
+ansible-playbook playbooks/verify.yml
+```
+
+Acceptance test: push a commit to `Deploiment` `main` while an instance is
+syncing, and check that it converges on the new commit on its own.
+
 ## Secrets
 
 Phase 4 (`playbooks/secrets.yml`, also imported by `site.yml`) runs

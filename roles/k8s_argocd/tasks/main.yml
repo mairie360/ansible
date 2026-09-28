@@ -87,15 +87,70 @@
     dest: /opt/Deploiment/instances-appset.yaml
     mode: "0644"
 
-# C'est ce fichier qui scope l'Argo CD à `clusters/{{ org_id }}/instances/*`.
-# Il n'est pas versionné dans Deploiment parce qu'il dépend de org_id : chaque
-# groupe a le sien, et aucun Argo CD ne voit les instances d'un autre.
+# Migration from the multi-source layout (MAIR-173). Instance Applications
+# used to be multi-source, so argocd-image-updater stored its tags under
+# spec.sources[0].helm.parameters. The single-source AppSet only preserves
+# spec.source.helm.parameters: without this carry-over, every instance would
+# fall back to the tags of its values.yaml until the image updater's next
+# pass. No-op once every Application is single-source.
+- name: Save the image tags of multi-source instance Applications
+  ansible.builtin.shell: |
+    set -o pipefail
+    kubectl -n argocd get applications.argoproj.io -o json | jq -c '
+      [.items[]
+       | select(any(.metadata.ownerReferences[]?; .kind == "ApplicationSet" and .name == "instances"))
+       | select(.spec.sources != null)
+       | {name: .metadata.name, parameters: (.spec.sources[0].helm.parameters // [])}
+       | select(.parameters | length > 0)]'
+  args:
+    executable: /bin/bash
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  register: multisource_apps
+  changed_when: false
+
+# This file scopes the Argo CD to `clusters/{{ org_id }}/instances/*`. It is
+# not versioned in Deploiment because it depends on org_id: each group has its
+# own, and no Argo CD sees another group's instances.
 - name: Appliquer l'ApplicationSet des instances
   ansible.builtin.command: kubectl apply -n argocd -f /opt/Deploiment/instances-appset.yaml
   environment:
     KUBECONFIG: /etc/rancher/k3s/k3s.yaml
   register: appset_apply
   changed_when: "'created' in appset_apply.stdout or 'configured' in appset_apply.stdout"
+
+- name: Wait for the ApplicationSet to convert the instance Applications
+  ansible.builtin.command: >
+    kubectl -n argocd get applications.argoproj.io {{ item.name }}
+    -o jsonpath={.spec.source.repoURL}
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  register: converted
+  changed_when: false
+  retries: 30
+  delay: 2
+  until: converted.stdout | length > 0
+  loop: "{{ multisource_apps.stdout | from_json }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Restore the image tags on the converted Applications
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - -n
+      - argocd
+      - patch
+      - applications.argoproj.io
+      - "{{ item.name }}"
+      - --type=merge
+      - -p
+      - "{{ {'spec': {'source': {'helm': {'parameters': item.parameters}}}} | to_json }}"
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  loop: "{{ multisource_apps.stdout | from_json }}"
+  loop_control:
+    label: "{{ item.name }}"
 
 # --- GHCR credentials (argocd/ghcr-secret) ------------------------------------
 # argocd-image-updater reads the GHCR tags with pullsecret:argocd/ghcr-secret
