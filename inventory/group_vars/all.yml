@@ -18,6 +18,14 @@ deploiment_env_revisions:
   staging: "staging"
   prod: "prod"
 
+# Environments whose Application syncs automatically (prune + selfHeal). The
+# others are synced by hand from Argo CD, which keeps a first deployment or a
+# promotion to staging/prod a deliberate act. Applies to every group: a client
+# group whose only environment is `prod` is synced by hand too. Re-run the
+# k8s_argocd role after changing it.
+deploiment_auto_sync_envs:
+  - dev
+
 # Pinned versions. Bumps go through a PR, never through a playbook run that
 # would pick "the latest".
 #
