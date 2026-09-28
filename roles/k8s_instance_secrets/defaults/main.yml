@@ -9,10 +9,11 @@
 #            s3_secret_key: xxx
 #            backup_access_key_id: xxx        # only when backup.enabled
 #            backup_secret_access_key: xxx
+#            cockpit_token: xxx               # MAIR-131, only when observability.enabled
 #            admin_email: admin@example.org   # MAIR-170, mandatory
 #   2. the environment variable of the controller (same for every instance):
 #      RESEND_API_KEY, S3_ACCESS_KEY, S3_SECRET_KEY, AWS_ACCESS_KEY_ID,
-#      AWS_SECRET_ACCESS_KEY, ADMIN_EMAIL;
+#      AWS_SECRET_ACCESS_KEY, COCKPIT_TOKEN, ADMIN_EMAIL;
 #   3. the value already sealed on the instance (kept by seal-secrets.sh);
 #   4. an interactive prompt (secrets_prompt, inventory/group_vars/all.yml).
 #
@@ -32,6 +33,7 @@ instance_secret_env:
   s3_secret_key: S3_SECRET_KEY
   backup_access_key_id: AWS_ACCESS_KEY_ID
   backup_secret_access_key: AWS_SECRET_ACCESS_KEY
+  cockpit_token: COCKPIT_TOKEN
   admin_email: ADMIN_EMAIL
 
 # Where the generated secrets.yaml is copied back: the Deploiment checkout

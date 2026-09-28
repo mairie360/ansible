@@ -9,7 +9,7 @@
 #
 #   1. waits for the sealed-secrets controller Argo CD deploys on the instance
 #      (it needs the mairie360.fr/role=instance label set by phase 3);
-#   2. resolves the external secrets (Resend, S3, backup bucket, GHCR) from
+#   2. resolves the external secrets (Resend, S3, backup bucket, Cockpit, GHCR) from
 #      variables, else keeps what the instance already has, else prompts;
 #      the admin account e-mail (MAIR-170) is resolved the same way but is
 #      mandatory: the play fails if it is still empty after the prompt;
@@ -111,13 +111,15 @@
     K="kubectl --kubeconfig {{ instance_kubeconfig }} -n {{ instance_ns }}"
     app=$($K get secret {{ env_name }}-app-secrets -o json 2>/dev/null || echo '{}')
     backup=$($K get secret {{ env_name }}-backup-secret -o name 2>/dev/null || true)
+    cockpit=$($K get secret {{ env_name }}-cockpit-secret -o json 2>/dev/null || echo '{}')
     ghcr=$($K get secret ghcr-secret -o name 2>/dev/null || true)
-    jq -cn --argjson app "$app" --arg backup "$backup" --arg ghcr "$ghcr" '{
+    jq -cn --argjson app "$app" --arg backup "$backup" --argjson cockpit "$cockpit" --arg ghcr "$ghcr" '{
       resend_api_key: (($app.data.SMTP_PASSWORD // "") != ""),
       s3_access_key:  (($app.data.S3_ACCESS_KEY // "") != ""),
       s3_secret_key:  (($app.data.S3_SECRET_KEY // "") != ""),
       backup_access_key_id:     ($backup != ""),
       backup_secret_access_key: ($backup != ""),
+      cockpit_token: (($cockpit.data.COCKPIT_TOKEN // "") != ""),
       ghcr: ($ghcr != "")
     }'
   args:
@@ -130,6 +132,7 @@
   ansible.builtin.set_fact:
     on_cluster: "{{ on_cluster_raw.stdout | from_json }}"
     backup_enabled: "{{ ((instance_values_raw.content | b64decode | from_yaml).backup | default({})).enabled | default(false) | bool }}"
+    observability_enabled: "{{ (((instance_values_raw.content | b64decode | from_yaml).global | default({})).observability | default({})).enabled | default(false) | bool }}"
     resolved_secrets: >-
       {{ resolved_secrets | default({}) | combine({
            item.key: (instance_secrets[inventory_hostname] | default({}))[item.key]
@@ -143,7 +146,8 @@
 # --- Prompts -----------------------------------------------------------------
 # Only for what is neither provided nor already on the instance. The backup
 # bucket keys are only asked when backup.enabled is true in the instance
-# values. Leave a prompt empty to skip it: seal-secrets.sh then seals the key
+# values, the Cockpit token when global.observability.enabled is (MAIR-131:
+# to seal it before enabling, pass COCKPIT_TOKEN or instance_secrets instead). Leave a prompt empty to skip it: seal-secrets.sh then seals the key
 # empty and verify.yml reports it.
 
 - name: Ask for the missing external secrets
@@ -157,6 +161,7 @@
     - { key: s3_secret_key, label: "Object Storage secret key (S3_SECRET_KEY of elearning-api)" }
     - { key: backup_access_key_id, label: "Backup bucket access key (AWS_ACCESS_KEY_ID)" }
     - { key: backup_secret_access_key, label: "Backup bucket secret key (AWS_SECRET_ACCESS_KEY)" }
+    - { key: cockpit_token, label: "Scaleway Cockpit token, push metrics + push traces (COCKPIT_TOKEN)" }
   loop_control:
     label: "{{ item.key }}"
   when:
@@ -164,6 +169,7 @@
     - resolved_secrets[item.key] | length == 0
     - not on_cluster[item.key]
     - backup_enabled | bool or not item.key.startswith('backup_')
+    - observability_enabled | bool or item.key != 'cockpit_token'
   # The registered results hold what was typed.
   no_log: true
 
@@ -257,6 +263,7 @@
     S3_SECRET_KEY: "{{ resolved_secrets.s3_secret_key }}"
     AWS_ACCESS_KEY_ID: "{{ resolved_secrets.backup_access_key_id }}"
     AWS_SECRET_ACCESS_KEY: "{{ resolved_secrets.backup_secret_access_key }}"
+    COCKPIT_TOKEN: "{{ resolved_secrets.cockpit_token }}"
     ADMIN_EMAIL: "{{ resolved_secrets.admin_email }}"
     GHCR_USER: "{{ ghcr_seal_user }}"
     GHCR_TOKEN: "{{ ghcr_seal_token }}"
@@ -330,7 +337,7 @@
   ansible.builtin.debug:
     msg: "{{ inventory_hostname }}: {{ item }} is empty, see the seal-secrets.sh output above."
   loop: >-
-    {{ ['resend_api_key', 's3_access_key', 's3_secret_key']
+    {{ (['resend_api_key', 's3_access_key', 's3_secret_key'] + (['cockpit_token'] if observability_enabled | bool else []))
        | reject('in', on_cluster | dict2items | selectattr('value') | map(attribute='key') | list)
        | select('in', resolved_secrets | dict2items | rejectattr('value') | map(attribute='key') | list)
        | list }}
