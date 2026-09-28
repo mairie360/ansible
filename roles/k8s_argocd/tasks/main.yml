@@ -48,10 +48,13 @@
     KUBECONFIG: /etc/rancher/k3s/k3s.yaml
   changed_when: false
 
-- name: Installer la CLI argocd (utilisée par le rôle de liaison)
+# With a checksum, get_url replaces the binary whenever it differs from the
+# pinned release: a version bump also upgrades the CLI.
+- name: Install the argocd CLI (pinned, sha256 verified; used by phase 3)
   ansible.builtin.get_url:
     url: "https://github.com/argoproj/argo-cd/releases/download/{{ argocd_version }}/argocd-linux-amd64"
     dest: /usr/local/bin/argocd
+    checksum: "sha256:https://github.com/argoproj/argo-cd/releases/download/{{ argocd_version }}/cli_checksums.txt"
     mode: "0755"
 
 # --- Amorçage GitOps ----------------------------------------------------------

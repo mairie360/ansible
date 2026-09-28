@@ -142,13 +142,55 @@
         - "{{ inventory_hostname }}"
   notify: Redémarrer k3s
 
-- name: Installer k3s
-  ansible.builtin.shell: |
-    set -o pipefail
-    curl -sfL https://get.k3s.io | INSTALL_K3S_CHANNEL={{ k3s_channel }} sh -
-  args:
-    executable: /bin/bash
-    creates: /usr/local/bin/k3s
+# Installed and upgraded with the install.sh of the pinned tag (it verifies
+# the binary's sha256 against the release). Idempotent: the installer only
+# runs when the installed version differs from k3s_version.
+- name: Read the installed k3s version
+  ansible.builtin.command: /usr/local/bin/k3s --version
+  register: k3s_installed
+  changed_when: false
+  failed_when: false
+
+# "v1.35.8+k3s1" -> "1.35.8.1": comparable with the `version` test.
+- name: Compare the installed k3s version with the pin
+  ansible.builtin.set_fact:
+    k3s_installed_version: "{{ k3s_installed.stdout | default('') | regex_search('v[0-9]+[.][0-9]+[.][0-9]+[+]k3s[0-9]+') or '' }}"
+    k3s_target_key: "{{ k3s_version | regex_replace('^v', '') | regex_replace('[+]k3s', '.') }}"
+
+- name: Refuse a k3s downgrade or a skipped Kubernetes minor
+  ansible.builtin.assert:
+    that:
+      - k3s_installed_key is version(k3s_target_key, '<=')
+      - k3s_target_key.split('.')[0] == k3s_installed_key.split('.')[0]
+      - (k3s_target_key.split('.')[1] | int) - (k3s_installed_key.split('.')[1] | int) <= 1
+    fail_msg: >-
+      {{ inventory_hostname }} runs k3s {{ k3s_installed_version }}, the pin is
+      {{ k3s_version }}. Downgrades are refused, and Kubernetes upgrades one
+      minor at a time: from v1.{{ k3s_installed_key.split('.')[1] }}, first run
+      site.yml with -e k3s_version=<latest patch of
+      v1.{{ (k3s_installed_key.split('.')[1] | int) + 1 }}>, then the next minor
+      (README, "Upgrading k3s").
+  vars:
+    k3s_installed_key: "{{ k3s_installed_version | regex_replace('^v', '') | regex_replace('[+]k3s', '.') }}"
+  when: k3s_installed_version | length > 0
+
+- name: Download the k3s installer of the pinned release
+  ansible.builtin.get_url:
+    url: "https://raw.githubusercontent.com/k3s-io/k3s/{{ k3s_version | urlencode }}/install.sh"
+    dest: "/usr/local/src/k3s-install-{{ k3s_version }}.sh"
+    mode: "0755"
+  when: k3s_installed_version != k3s_version
+
+# One machine at a time: every machine is its own single-node cluster, so an
+# upgrade restarts all of its pods. Upgrading sequentially keeps the other
+# instances up (still, start with dev: --limit on its group).
+- name: Install or upgrade k3s to the pinned release
+  ansible.builtin.command: "/usr/local/src/k3s-install-{{ k3s_version }}.sh"
+  environment:
+    INSTALL_K3S_VERSION: "{{ k3s_version }}"
+  when: k3s_installed_version != k3s_version
+  throttle: 1
+  changed_when: true
 
 - name: Appliquer immédiatement un éventuel changement de configuration k3s
   ansible.builtin.meta: flush_handlers
