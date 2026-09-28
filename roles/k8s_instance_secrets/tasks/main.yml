@@ -344,3 +344,4 @@
       - "Sealing key: {{ sealing_keys_dir }}/{{ org_id }}-{{ env_name }}.yaml (store it in the team vault)"
       - "Argo CD deploys them once pushed to {{ deploiment_repo_branch }}:"
       - "  cd {{ deploiment_local_path }} && git add {{ instance_dir }}/secrets.yaml && git commit -m 'chore({{ env_name }}): seal secrets' && git push"
+      - "{{ env_name }} follows the branch {{ deploiment_env_revisions[env_name] | default(deploiment_repo_branch) }}: unless that is {{ deploiment_repo_branch }}, promote the commit with the Promote workflow of Deploiment."

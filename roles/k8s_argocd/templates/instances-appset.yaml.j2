@@ -49,9 +49,16 @@ spec:
       # Value files are read through a path relative to the chart directory.
       # Argo CD accepts it without any repo-server flag as long as it stays
       # inside the repository root.
+      #
+      # The revision depends on the environment (deploiment_env_revisions):
+      # dev follows {{ deploiment_repo_branch }}, staging and prod follow the
+      # branches the "Promote" workflow of Deploiment advances. The git
+      # generator above still lists directories on {{ deploiment_repo_branch }}
+      # only, so a new environment directory must be promoted before its
+      # Application can render.
       source:
         repoURL: {{ deploiment_repo_url }}
-        targetRevision: {{ deploiment_repo_branch }}
+        targetRevision: '{% raw %}{{ index (dict{% endraw %}{% for env, rev in deploiment_env_revisions.items() %} {{ env | to_json }} {{ rev | to_json }}{% endfor %}{% raw %}) .path.basename | default {% endraw %}{{ deploiment_repo_branch | to_json }}{% raw %} }}{% endraw %}'
         path: charts/mairie360-stack
         helm:
           # releaseName = environment name: resources are prefixed
