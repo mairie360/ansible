@@ -6,6 +6,18 @@ deploiment_repo_url: "https://github.com/mairie360/Deploiment.git"
 # évite le « je pousse mais rien ne change ».
 deploiment_repo_branch: "main"
 
+# Git revision of Deploiment that each environment's Application follows
+# (chart + values.yaml + secrets.yaml, one single source). `dev` follows
+# deploiment_repo_branch, so pointing it at a feature branch still tests a
+# change on dev only. `staging` and `prod` follow their own branches, which
+# only move through the "Promote" workflow of Deploiment (main -> staging ->
+# prod, fast-forward only). An environment missing from this map falls back
+# to deploiment_repo_branch. Re-run the k8s_argocd role after changing it.
+deploiment_env_revisions:
+  dev: "{{ deploiment_repo_branch }}"
+  staging: "staging"
+  prod: "prod"
+
 # Pinned versions. Bumps go through a PR, never through a playbook run that
 # would pick "the latest".
 #
