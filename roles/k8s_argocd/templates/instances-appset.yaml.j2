@@ -75,6 +75,21 @@ spec:
         # Name under which role k8s_instance_link registers the cluster.
         name: '{% raw %}{{ .path.basename }}{% endraw %}'
         namespace: 'mairie360-{% raw %}{{ .path.basename }}{% endraw %}'
+      # The API server adds fields to every volumeClaimTemplates entry of a
+      # StatefulSet (apiVersion, kind, status, spec.volumeMode) that the chart
+      # does not declare. Argo CD reports them as a difference forever, so an
+      # instance stayed OutOfSync although the sync succeeded and the live
+      # objects matched the chart. Ignore only those defaulted fields: the
+      # rest of the template (size, storage class, access modes) is still
+      # compared.
+      ignoreDifferences:
+        - group: apps
+          kind: StatefulSet
+          jqPathExpressions:
+            - '.spec.volumeClaimTemplates[]?.apiVersion'
+            - '.spec.volumeClaimTemplates[]?.kind'
+            - '.spec.volumeClaimTemplates[]?.status'
+            - '.spec.volumeClaimTemplates[]?.spec.volumeMode'
       syncPolicy:
         automated:
           prune: true
