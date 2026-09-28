@@ -81,6 +81,13 @@ one that reaches the instance API server, through the tunnel. For each instance:
   `AWS_SECRET_ACCESS_KEY`), the value already on the instance, otherwise
   **a prompt** (empty to skip). The backup bucket keys are only asked when
   `backup.enabled` is true in the instance values;
+- the town hall administrator's e-mail (`instance_secrets[<host>].admin_email`
+  / `ADMIN_EMAIL`, MAIR-170) is resolved the same way, but is **mandatory**:
+  prompted in clear (not hidden), and the play **fails** if it is still empty
+  — no instance should keep Database's public template admin account by
+  accident. `seal-secrets.sh` generates the matching `ADMIN_PASSWORD` itself
+  and keeps it on later runs; this role cannot yet read that value back to
+  deposit it on the workstation (tracked in `roles/k8s_instance_secrets/tasks/main.yml`);
 - GHCR credentials come from `GHCR_USER` / `GHCR_TOKEN`, else from
   `argocd/ghcr-secret` (phase 2 prompts for it once per group);
 - `secrets.yaml` is copied into the local `Deploiment` checkout, and the
