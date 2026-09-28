@@ -1,3 +1,8 @@
 # Ports publics selon le rôle de la machine.
 # Instance : 80/443 (les fronts). Argo CD : rien, tout passe par le VPN.
 node_public_ports: []
+
+# Swap file, in MiB. 0 removes the swap (what this role used to do). 2 GiB is a
+# safety net for a 4 GB machine; it needs that much free space on the root disk.
+node_swap_size_mb: 2048
+node_swap_file: /swapfile
