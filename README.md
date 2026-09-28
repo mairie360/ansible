@@ -116,9 +116,11 @@ one that reaches the instance API server, through the tunnel. For each instance:
   (e.g. `-e @secrets.yml --ask-vault-pass`, see
   `roles/k8s_instance_secrets/defaults/main.yml`), environment variables
   (`RESEND_API_KEY`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `AWS_ACCESS_KEY_ID`,
-  `AWS_SECRET_ACCESS_KEY`), the value already on the instance, otherwise
-  **a prompt** (empty to skip). The backup bucket keys are only asked when
-  `backup.enabled` is true in the instance values;
+  `AWS_SECRET_ACCESS_KEY`, `COCKPIT_TOKEN`), the value already on the instance,
+  otherwise **a prompt** (empty to skip). The backup bucket keys are only asked
+  when `backup.enabled` is true in the instance values, and the Scaleway
+  Cockpit token (`COCKPIT_TOKEN`, MAIR-131, read by the OpenTelemetry
+  Collector) when `global.observability.enabled` is;
 - the town hall administrator's e-mail (`instance_secrets[<host>].admin_email`
   / `ADMIN_EMAIL`, MAIR-170) is resolved the same way, but is **mandatory**:
   prompted in clear (not hidden), and the play **fails** if it is still empty
@@ -138,6 +140,9 @@ In CI, pass `-e secrets_prompt=false`: missing secrets are then only reported.
 ```bash
 # Change a single instance's Resend key
 RESEND_API_KEY=re_xxx ansible-playbook playbooks/secrets.yml --limit mairie360-dev
+
+# Seal the Cockpit token before enabling global.observability (no prompt then)
+COCKPIT_TOKEN=xxx ansible-playbook playbooks/secrets.yml --limit mairie360-dev
 ```
 
 ### Secrets never reach the logs
