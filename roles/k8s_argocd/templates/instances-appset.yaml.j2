@@ -90,10 +90,21 @@ spec:
             - '.spec.volumeClaimTemplates[]?.kind'
             - '.spec.volumeClaimTemplates[]?.status'
             - '.spec.volumeClaimTemplates[]?.spec.volumeMode'
+
+  # syncPolicy is an object field, so it cannot be templated in place: only
+  # the environments of deploiment_auto_sync_envs ({{ deploiment_auto_sync_envs | join(', ') }}) get automated
+  # sync; the others are synced by hand from Argo CD (the Application shows
+  # OutOfSync until then). syncOptions apply to every environment.
+  templatePatch: |
+    spec:
       syncPolicy:
+        {%- raw %}
+        {{- if has .path.basename (list{% endraw %}{% for env in deploiment_auto_sync_envs %} {{ env | to_json }}{% endfor %}{% raw %}) }}
         automated:
           prune: true
           selfHeal: true
+        {{- end }}{% endraw %}
+
         syncOptions:
           - CreateNamespace=true
           - ServerSideApply=true
