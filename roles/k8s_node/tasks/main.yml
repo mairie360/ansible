@@ -13,16 +13,75 @@
     update_cache: true
     cache_valid_time: 3600
 
-- name: Désactiver le swap (kubelet le supporte mal)
-  ansible.builtin.command: swapoff -a
-  when: ansible_swaptotal_mb | default(0) | int > 0
-  changed_when: ansible_swaptotal_mb | default(0) | int > 0
+# --- Swap --------------------------------------------------------------------
+# A small swap file is a safety net, not extra capacity: when memory runs out
+# (for instance every pod restarting at once after a reboot) the kernel pages
+# idle memory out instead of evicting the page cache until the machine stops
+# answering (SSH banner timeouts, API server TLS handshake timeouts).
+# k3s already starts the kubelet with --fail-swap-on=false. Pods only use the
+# swap through the kubelet drop-in written with the k3s configuration below.
+# node_swap_size_mb: 0 removes the swap instead.
 
-- name: Retirer le swap de /etc/fstab
+- name: Create the swap file
+  ansible.builtin.command: "fallocate -l {{ node_swap_size_mb }}M {{ node_swap_file }}"
+  args:
+    creates: "{{ node_swap_file }}"
+  when: node_swap_size_mb | int > 0
+
+- name: Restrict the swap file permissions
+  ansible.builtin.file:
+    path: "{{ node_swap_file }}"
+    owner: root
+    group: root
+    mode: "0600"
+  when: node_swap_size_mb | int > 0
+
+- name: Format the swap file
+  community.general.filesystem:
+    fstype: swap
+    dev: "{{ node_swap_file }}"
+  when: node_swap_size_mb | int > 0
+
+- name: List the active swap areas
+  ansible.builtin.command: swapon --noheadings --show=NAME
+  register: node_swap_active
+  changed_when: false
+
+- name: Enable the swap file
+  ansible.builtin.command: "swapon {{ node_swap_file }}"
+  when:
+    - node_swap_size_mb | int > 0
+    - node_swap_file not in node_swap_active.stdout_lines
+
+- name: Mount the swap file at boot
+  ansible.posix.mount:
+    path: none
+    src: "{{ node_swap_file }}"
+    fstype: swap
+    opts: sw
+    state: present
+  when: node_swap_size_mb | int > 0
+
+- name: Prefer keeping memory over swapping (idle pages only)
+  ansible.posix.sysctl:
+    name: vm.swappiness
+    value: "10"
+    sysctl_file: /etc/sysctl.d/99-swap.conf
+    reload: true
+  when: node_swap_size_mb | int > 0
+
+- name: Disable the swap
+  ansible.builtin.command: swapoff -a
+  when:
+    - node_swap_size_mb | int == 0
+    - ansible_swaptotal_mb | default(0) | int > 0
+
+- name: Remove the swap from /etc/fstab
   ansible.posix.mount:
     path: none
     fstype: swap
     state: absent
+  when: node_swap_size_mb | int == 0
 
 # --- Pare-feu ----------------------------------------------------------------
 # Règle d'architecture : seuls les fronts sont exposés. Sur une instance,
@@ -113,6 +172,38 @@
     state: directory
     mode: "0755"
 
+- name: Create the kubelet configuration drop-in directory
+  ansible.builtin.file:
+    path: /etc/rancher/k3s/kubelet.conf.d
+    state: directory
+    mode: "0755"
+
+# LimitedSwap lets each Burstable container use swap in proportion to its
+# memory request (cgroup v2). The default, NoSwap, would keep every pod out of
+# the swap file and leave it to the system daemons only. Without swap on the
+# node (node_swap_size_mb: 0) the drop-in is removed and the kubelet keeps its
+# defaults.
+- name: Write the kubelet swap drop-in
+  ansible.builtin.copy:
+    dest: /etc/rancher/k3s/kubelet.conf.d/10-swap.conf
+    mode: "0644"
+    content: |
+      apiVersion: kubelet.config.k8s.io/v1beta1
+      kind: KubeletConfiguration
+      featureGates:
+        NodeSwap: true
+      memorySwap:
+        swapBehavior: LimitedSwap
+  when: node_swap_size_mb | int > 0
+  notify: Redémarrer k3s
+
+- name: Remove the kubelet swap drop-in
+  ansible.builtin.file:
+    path: /etc/rancher/k3s/kubelet.conf.d/10-swap.conf
+    state: absent
+  when: node_swap_size_mb | int == 0
+  notify: Redémarrer k3s
+
 - name: Write the k3s configuration
   ansible.builtin.copy:
     dest: /etc/rancher/k3s/config.yaml
@@ -144,6 +235,9 @@
         # of the group cannot reach this API server without a TLS error.
         - "{{ wg_ip }}"
         - "{{ inventory_hostname }}"
+      # Kubelet configuration drop-ins (swap, see the tasks above).
+      kubelet-arg:
+        - "config-dir=/etc/rancher/k3s/kubelet.conf.d"
   notify: Redémarrer k3s
 
 # Installed and upgraded with the install.sh of the pinned tag (it verifies

@@ -96,6 +96,44 @@ git add clusters/<org>/instances/<env>/secrets.yaml && git commit && git push
 Until that file is pushed, the pods stay in `CreateContainerConfigError`:
 expected, not a bug.
 
+### Stuck sync operation
+
+The instances ApplicationSet (`roles/k8s_argocd/templates/instances-appset.yaml.j2`)
+is single-source on purpose: chart and values are read from the same
+`Deploiment` revision, through a path relative to the chart. The former
+multi-source layout (chart + `ref: values`) broke whenever a commit landed on
+`main` during a sync (`cannot reference a different revision of the same
+repository`), and the operation stayed pinned on the old SHA
+(argoproj/argo-cd#29716). Do not go back to it.
+
+`playbooks/verify.yml` fails if an operation is still stuck (ComparisonError,
+or `Running` for more than `verify_stuck_sync_minutes`, 15 by default). To
+unblock it, on the Argo CD machine (the kubeconfig is written by phase 3, with
+`argocd` as its default namespace):
+
+```bash
+sudo KUBECONFIG=/root/.kube/argocd-cli.yaml argocd app terminate-op <env> --core
+```
+
+Migrating a group whose Applications are still multi-source (every group
+provisioned before MAIR-173): re-run `site.yml` on the whole group. The
+ApplicationSet is per group, so all its instances switch at once (there is no
+"dev first" here). Phase 2 carries the image tags written by
+argocd-image-updater over to the new layout, then:
+
+```bash
+# On the Argo CD machine: every instance Application is single-source...
+sudo kubectl -n argocd get applications.argoproj.io \
+  -o custom-columns='NAME:.metadata.name,SOURCE:.spec.source.path,SOURCES:.spec.sources[*].ref'
+# ...and still carries its image tags (not the values.yaml ones)
+sudo kubectl -n argocd get applications.argoproj.io <env> -o jsonpath='{.spec.source.helm.parameters}'
+
+ansible-playbook playbooks/verify.yml
+```
+
+Acceptance test: push a commit to `Deploiment` `main` while an instance is
+syncing, and check that it converges on the new commit on its own.
+
 ## Secrets
 
 Phase 4 (`playbooks/secrets.yml`, also imported by `site.yml`) runs
@@ -109,9 +147,18 @@ one that reaches the instance API server, through the tunnel. For each instance:
   (e.g. `-e @secrets.yml --ask-vault-pass`, see
   `roles/k8s_instance_secrets/defaults/main.yml`), environment variables
   (`RESEND_API_KEY`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `AWS_ACCESS_KEY_ID`,
-  `AWS_SECRET_ACCESS_KEY`), the value already on the instance, otherwise
-  **a prompt** (empty to skip). The backup bucket keys are only asked when
-  `backup.enabled` is true in the instance values;
+  `AWS_SECRET_ACCESS_KEY`, `COCKPIT_TOKEN`), the value already on the instance,
+  otherwise **a prompt** (empty to skip). The backup bucket keys are only asked
+  when `backup.enabled` is true in the instance values, and the Scaleway
+  Cockpit token (`COCKPIT_TOKEN`, MAIR-131, read by the OpenTelemetry
+  Collector) when `global.observability.enabled` is;
+- the town hall administrator's e-mail (`instance_secrets[<host>].admin_email`
+  / `ADMIN_EMAIL`, MAIR-170) is resolved the same way, but is **mandatory**:
+  prompted in clear (not hidden), and the play **fails** if it is still empty
+  — no instance should keep Database's public template admin account by
+  accident. `seal-secrets.sh` generates the matching `ADMIN_PASSWORD` itself
+  and keeps it on later runs; this role cannot yet read that value back to
+  deposit it on the workstation (tracked in `roles/k8s_instance_secrets/tasks/main.yml`);
 - GHCR credentials come from `GHCR_USER` / `GHCR_TOKEN`, else from
   `argocd/ghcr-secret` (phase 2 prompts for it once per group);
 - `secrets.yaml` is copied into the local `Deploiment` checkout, and the
@@ -124,6 +171,9 @@ In CI, pass `-e secrets_prompt=false`: missing secrets are then only reported.
 ```bash
 # Change a single instance's Resend key
 RESEND_API_KEY=re_xxx ansible-playbook playbooks/secrets.yml --limit mairie360-dev
+
+# Seal the Cockpit token before enabling global.observability (no prompt then)
+COCKPIT_TOKEN=xxx ansible-playbook playbooks/secrets.yml --limit mairie360-dev
 ```
 
 ### Secrets never reach the logs
