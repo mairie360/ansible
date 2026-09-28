@@ -95,6 +95,25 @@ In CI, pass `-e secrets_prompt=false`: missing secrets are then only reported.
 RESEND_API_KEY=re_xxx ansible-playbook playbooks/secrets.yml --limit mairie360-dev
 ```
 
+### Secrets never reach the logs
+
+Every task that reads, holds or writes a secret (passwords, tokens, WireGuard
+keys, kubeconfigs, the sealing key, hidden prompts) carries `no_log: true`, and
+no task prints one. The Argo CD admin password in particular is not printed:
+phase 2 only shows the command that reads it on the Argo CD machine:
+
+```bash
+sudo kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d
+```
+
+Change it after the first login (`argocd account update-password`), then
+delete `argocd-initial-admin-secret`. Run logs (`logs/`, `*.log`) are
+git-ignored. Before committing a role change, run the static check:
+
+```bash
+python3 tests/check_no_log.py   # fails on a secret-handling task without no_log
+```
+
 ## Ajouter un client
 
 Trois fichiers, aucun playbook ni rôle à toucher :

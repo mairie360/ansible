@@ -48,20 +48,22 @@
     executable: /bin/bash
     creates: /etc/wireguard/public.key
 
-- name: Lire la clé privée
+- name: Read the private key
   ansible.builtin.slurp:
     src: /etc/wireguard/private.key
   register: wg_private
+  no_log: true
 
 - name: Lire la clé publique
   ansible.builtin.slurp:
     src: /etc/wireguard/public.key
   register: wg_public
 
-- name: Mémoriser les clés pour les autres machines du groupe
+- name: Keep the keys for the other machines of the group
   ansible.builtin.set_fact:
     wg_private_key: "{{ wg_private.content | b64decode | trim }}"
     wg_public_key: "{{ wg_public.content | b64decode | trim }}"
+  no_log: true
 
 # Les deux facts ci-dessus sont lisibles via hostvars par les autres hôtes du
 # play : c'est ce qui permet au serveur de connaître les clés publiques de ses
@@ -74,6 +76,9 @@
     owner: root
     group: root
     mode: "0600"
+  # wg0.conf embeds the private key: no diff, no logged arguments.
+  diff: false
+  no_log: true
   notify: Redémarrer WireGuard
 
 - name: Ouvrir le port WireGuard (serveur du groupe uniquement)

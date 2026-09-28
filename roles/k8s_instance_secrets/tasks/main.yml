@@ -162,6 +162,8 @@
     - resolved_secrets[item.key] | length == 0
     - not on_cluster[item.key]
     - backup_enabled | bool or not item.key.startswith('backup_')
+  # The registered results hold what was typed.
+  no_log: true
 
 - name: Keep the prompted secrets
   ansible.builtin.set_fact:
@@ -274,6 +276,7 @@
     mode: "0600"
   delegate_to: localhost
   become: false
+  diff: false
   no_log: true
 
 # --- Summary -------------------------------------------------------------------
