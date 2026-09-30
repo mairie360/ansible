@@ -1,0 +1,134 @@
+---
+# =============================================================================
+# Opens ONE Deploiment PR with the secrets.yaml of every instance sealed in
+# this run (secrets_open_pr). Included by playbooks/secrets.yml on the last
+# instance of the play only: the play is `serial: 1`, so running it from the
+# role itself would open one PR per instance.
+#
+# Everything runs on the workstation, in a temporary git worktree of the
+# local Deploiment checkout cut from origin/<deploiment_repo_branch>: the
+# checkout itself (its branch, its other changes) is left as is, and nothing
+# is ever pushed to deploiment_repo_branch, which only takes PRs.
+# =============================================================================
+
+- name: Open the Deploiment PR
+  when: secrets_open_pr | bool
+  delegate_to: localhost
+  become: false
+  block:
+    # Only paths are kept: hostvars also hold the instances' secrets.
+    - name: List the instances sealed in this run
+      ansible.builtin.set_fact:
+        pr_files: >-
+          {{ ansible_play_hosts_all | map('extract', hostvars) | selectattr('instance_sealed', 'defined')
+             | map(attribute='instance_dir') | map('regex_replace', '$', '/secrets.yaml') | list }}
+
+    - name: Check that gh is authenticated
+      ansible.builtin.command: gh api user --jq .login
+      register: gh_login
+      changed_when: false
+
+    - name: Fetch the Deploiment base branch
+      ansible.builtin.command:
+        argv: [git, -C, "{{ deploiment_local_path }}", fetch, origin, "{{ deploiment_repo_branch }}"]
+      changed_when: false
+
+    - name: Create a temporary directory for the worktree
+      ansible.builtin.tempfile:
+        state: directory
+        prefix: seal-secrets-
+      register: pr_tmp
+
+    - name: Commit, push and open the PR
+      vars:
+        pr_worktree: "{{ pr_tmp.path }}/Deploiment"
+        pr_branch: "seal-secrets/{{ now(utc=true, fmt='%Y%m%d-%H%M%S') }}"
+        # Only the files that differ from origin/<deploiment_repo_branch>.
+        pr_changed: "{{ pr_diff.stdout_lines }}"
+        pr_title: >-
+          chore({{ pr_changed | map('split', '/') | map(attribute='3') | unique | sort | join(',') }}): seal secrets
+        pr_body: |
+          Secrets re-sealed by `playbooks/secrets.yml` (mairie360/ansible, role `k8s_instance_secrets`):
+
+          {% for f in pr_changed %}
+          - `{{ f }}`
+          {% endfor %}
+
+          Environments that follow another branch than `{{ deploiment_repo_branch }}` (see `deploiment_env_revisions`) only get these once promoted with the Promote workflow.
+      block:
+        # pr_branch is templated on every use: pin its value once.
+        - name: Pin the branch name
+          ansible.builtin.set_fact:
+            pr_branch_name: "{{ pr_branch }}"
+
+        - name: Create the worktree on a new branch
+          ansible.builtin.command:
+            argv: [git, -C, "{{ deploiment_local_path }}", worktree, add, -b, "{{ pr_branch_name }}",
+                   "{{ pr_worktree }}", "origin/{{ deploiment_repo_branch }}"]
+          changed_when: true
+
+        - name: Copy the sealed secrets.yaml into the worktree
+          ansible.builtin.copy:
+            src: "{{ deploiment_local_path }}/{{ item }}"
+            dest: "{{ pr_worktree }}/{{ item }}"
+            mode: "0644"
+          loop: "{{ pr_files }}"
+
+        - name: Stage the secrets.yaml files
+          ansible.builtin.command:
+            argv: "{{ ['git', '-C', pr_worktree, 'add', '--'] + pr_files }}"
+          changed_when: false
+
+        - name: Check whether any secrets.yaml changed
+          ansible.builtin.command:
+            argv: [git, -C, "{{ pr_worktree }}", diff, --cached, --name-only]
+          register: pr_diff
+          changed_when: pr_changed | length > 0
+
+        - name: Commit and push the branch
+          ansible.builtin.command:
+            argv: "{{ item }}"
+          loop:
+            - [git, -C, "{{ pr_worktree }}", commit, -m, "{{ pr_title }}", -m, "{{ pr_changed | join(', ') }}"]
+            - [git, -C, "{{ pr_worktree }}", push, -u, origin, "{{ pr_branch_name }}"]
+          when: pr_changed | length > 0
+          changed_when: true
+
+        - name: Open the PR
+          ansible.builtin.command:
+            argv: >-
+              {{ ['gh', 'pr', 'create', '--base', deploiment_repo_branch, '--head', pr_branch_name,
+                  '--title', pr_title, '--body', pr_body]
+                 + (['--reviewer', pr_reviewers | join(',')] if pr_reviewers else []) }}
+            chdir: "{{ pr_worktree }}"
+          vars:
+            pr_reviewers: "{{ secrets_pr_reviewers | reject('equalto', gh_login.stdout) | list }}"
+          register: pr_create
+          when: pr_changed | length > 0
+          changed_when: true
+
+        - name: Deploiment PR
+          ansible.builtin.debug:
+            msg: >-
+              {{ 'PR opened: ' ~ pr_create.stdout_lines | last
+                 if pr_changed | length > 0 else
+                 'No secrets.yaml changed on origin/' ~ deploiment_repo_branch ~ ': no PR opened.' }}
+      always:
+        - name: Remove the worktree
+          ansible.builtin.command:
+            argv: [git, -C, "{{ deploiment_local_path }}", worktree, remove, --force, "{{ pr_worktree }}"]
+          failed_when: false
+          changed_when: false
+
+        # The pushed branch stays on origin; the local one is only a leftover.
+        - name: Delete the local branch
+          ansible.builtin.command:
+            argv: [git, -C, "{{ deploiment_local_path }}", branch, -D, "{{ pr_branch_name }}"]
+          when: pr_branch_name is defined
+          failed_when: false
+          changed_when: false
+
+        - name: Remove the temporary directory
+          ansible.builtin.file:
+            path: "{{ pr_tmp.path }}"
+            state: absent

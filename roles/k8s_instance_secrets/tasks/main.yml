@@ -13,13 +13,18 @@
 #      variables, else keeps what the instance already has, else prompts;
 #      the admin account e-mail (MAIR-170) is resolved the same way but is
 #      mandatory: the play fails if it is still empty after the prompt;
-#   3. runs seal-secrets.sh (generated secrets — JWT, Postgres, Redis — are
-#      kept when they already exist on the instance, never rotated here);
-#   4. copies secrets.yaml back into the local Deploiment checkout, and the
-#      instance sealing key into sealing_keys_dir.
+#   3. resolves RESTIC_PASSWORD and ADMIN_PASSWORD, the two generated secrets
+#      that must also live outside the cluster, and passes them to
+#      seal-secrets.sh (the other generated secrets — JWT, Postgres, Redis —
+#      are kept when they already exist on the instance, never rotated here);
+#   4. copies secrets.yaml back into the local Deploiment checkout, the
+#      instance sealing key into sealing_keys_dir, and RESTIC_PASSWORD /
+#      ADMIN_PASSWORD into local_backup_dir.
 #
-# Committing and pushing secrets.yaml stays a manual step: Argo CD only
-# deploys the secrets once it is on the tracked branch.
+# Argo CD only deploys the secrets once secrets.yaml is on the tracked
+# branch. With secrets_open_pr, tasks/open_pr.yml (run by playbooks/secrets.yml
+# after the last instance) opens one Deploiment PR for the whole run;
+# otherwise the summary shows the commands to do it by hand.
 #
 # Runs with `serial: 1` (playbooks/secrets.yml): prompts are then asked per
 # instance, not once for the whole play.
@@ -31,6 +36,9 @@
     instance_kubeconfig: "/root/.kube/instance-{{ env_name }}.yaml"
     instance_ns: "mairie360-{{ env_name }}"
     instance_dir: "clusters/{{ org_id }}/instances/{{ env_name }}"
+    local_backups:
+      restic_password: "{{ local_backup_dir }}/restic-{{ org_id }}-{{ env_name }}.txt"
+      admin_password: "{{ local_backup_dir }}/admin-{{ org_id }}-{{ env_name }}.txt"
 
 - name: Check that the local Deploiment checkout exists
   ansible.builtin.stat:
@@ -46,6 +54,14 @@
       {{ deploiment_local_path }}/{{ instance_dir }} does not exist on this
       workstation. Clone Deploiment next to this repo or pass
       -e deploiment_local_path=<path to the Deploiment checkout>.
+
+# Checked before sealing anything rather than after the last instance.
+- name: Check that gh is authenticated (secrets_open_pr)
+  ansible.builtin.command: gh auth status
+  delegate_to: localhost
+  become: false
+  changed_when: false
+  when: secrets_open_pr | bool
 
 # --- kubeseal on the Argo CD machine -----------------------------------------
 
@@ -204,6 +220,7 @@
   when:
     - admin_email_prompt is not skipped
     - admin_email_prompt.user_input | length > 0
+  no_log: true
 
 - name: Fail when the admin account e-mail is missing
   ansible.builtin.assert:
@@ -249,6 +266,54 @@
       (GHCR_USER / GHCR_TOKEN unset, no argocd/ghcr-secret): sealing now would
       remove it. Export GHCR_USER / GHCR_TOKEN or re-run site.yml (phase 2 asks).
 
+# --- Generated secrets kept outside the cluster ------------------------------
+# RESTIC_PASSWORD (MAIR-231: losing it makes every snapshot in the backup
+# bucket unreadable) and ADMIN_PASSWORD (MAIR-170: the town hall
+# administrator's first password) are generated like the other secrets, but
+# someone needs them outside the cluster. They are resolved here rather than
+# in seal-secrets.sh, so the value sealed is exactly the one backed up.
+# Resolved in this order, per instance:
+#   1. instance_secrets[<inventory_hostname>].restic_password / .admin_password
+#      (e.g. the RESTIC_PASSWORD of a reinstalled instance's existing bucket);
+#   2. the value already sealed on the instance;
+#   3. the local backup of an earlier run (secrets.yaml not pushed yet, so
+#      the instance does not have it);
+#   4. generated (64 hex characters, like seal-secrets.sh does).
+# With seal_extra_args "--rotate", steps 2 and 3 are skipped for
+# RESTIC_PASSWORD (a new one is generated); ADMIN_PASSWORD is never rotated
+# (see scripts/seal-secrets.sh).
+
+- name: Read the generated secrets already sealed on the instance
+  ansible.builtin.shell: |
+    set -o pipefail
+    K="kubectl --kubeconfig {{ instance_kubeconfig }} -n {{ instance_ns }}"
+    val() { $K get secret "$1" -o json 2>/dev/null | jq -r --arg k "$2" '.data[$k] // "" | @base64d' || true; }
+    jq -cn \
+      --arg restic "$(val {{ env_name }}-backup-secret RESTIC_PASSWORD)" \
+      --arg admin "$(val {{ env_name }}-database-secret ADMIN_PASSWORD)" \
+      '{restic_password: $restic, admin_password: $admin}'
+  args:
+    executable: /bin/bash
+  delegate_to: "{{ argocd_host }}"
+  register: generated_secrets_raw
+  changed_when: false
+  no_log: true
+
+- name: Resolve the generated secrets to back up
+  ansible.builtin.set_fact:
+    generated_secrets: >-
+      {{ generated_secrets | default({}) | combine({item: (
+           (instance_secrets[inventory_hostname] | default({}))[item] | default('', true)
+           or ('' if rotating | bool else (generated_secrets_raw.stdout | from_json)[item])
+           or ('' if rotating | bool or local_backups[item] is not file
+               else lookup('ansible.builtin.file', local_backups[item]))
+           or lookup('ansible.builtin.password', '/dev/null', chars=['0123456789abcdef'], length=64)
+         )}) }}
+  vars:
+    rotating: "{{ item == 'restic_password' and '--rotate' in seal_extra_args.split() }}"
+  loop: [restic_password, admin_password]
+  no_log: true
+
 # --- Sealing -------------------------------------------------------------------
 
 - name: Seal the instance secrets (Deploiment/scripts/seal-secrets.sh)
@@ -265,6 +330,8 @@
     AWS_SECRET_ACCESS_KEY: "{{ resolved_secrets.backup_secret_access_key }}"
     COCKPIT_TOKEN: "{{ resolved_secrets.cockpit_token }}"
     ADMIN_EMAIL: "{{ resolved_secrets.admin_email }}"
+    ADMIN_PASSWORD: "{{ generated_secrets.admin_password }}"
+    RESTIC_PASSWORD: "{{ generated_secrets.restic_password }}"
     GHCR_USER: "{{ ghcr_seal_user }}"
     GHCR_TOKEN: "{{ ghcr_seal_token }}"
   delegate_to: "{{ argocd_host }}"
@@ -283,6 +350,18 @@
     that: seal_run.rc == 0
     fail_msg: "seal-secrets.sh exited with {{ seal_run.rc }}, see its output above."
 
+# An older seal-secrets.sh ignores both variables and seals values of its
+# own: the backups written below would then not match the sealed secrets.
+- name: Fail when seal-secrets.sh did not seal the backed up secrets
+  ansible.builtin.assert:
+    that:
+      - seal_run.stdout is search('RESTIC_PASSWORD +: from RESTIC_PASSWORD')
+      - seal_run.stdout is search('ADMIN_PASSWORD +: from ADMIN_PASSWORD')
+    fail_msg: >-
+      The seal-secrets.sh of Deploiment {{ deploiment_repo_branch }} does not
+      read RESTIC_PASSWORD / ADMIN_PASSWORD from the environment yet. Nothing
+      was copied back: update Deploiment, then re-run this playbook.
+
 - name: Copy secrets.yaml back into the local Deploiment checkout
   ansible.builtin.fetch:
     src: "/opt/Deploiment/{{ instance_dir }}/secrets.yaml"
@@ -290,15 +369,34 @@
     flat: true
   delegate_to: "{{ argocd_host }}"
 
-# TODO (MAIR-170): seal-secrets.sh generates ADMIN_PASSWORD itself and only
-# ever prints a "généré" marker for it, never the value — it is sealed
-# straight from its own shell variable and never appears in seal_run.stdout
-# or on the instance (the cluster only gets it once secrets.yaml is committed
-# and Argo CD syncs it, well after this role returns). There is currently no
-# way for this role to read the generated value back to deposit it at
-# ~/.mairie360/admin-<org>-<env>.txt (mode 600) as the acceptance criteria of
-# MAIR-170 ask. Wire this up once seal-secrets.sh surfaces the value on a
-# channel this role can read without also showing it in the debug task above.
+# Read by tasks/open_pr.yml to list the instances of the run.
+- name: Mark the instance as sealed in this run
+  ansible.builtin.set_fact:
+    instance_sealed: true
+
+# --- Generated secrets backup ----------------------------------------------------
+# Same values as the ones just sealed. A value that changed (instance_secrets
+# override, --rotate) keeps the previous file next to it (copy backup: true).
+
+- name: Create the local backup directory
+  ansible.builtin.file:
+    path: "{{ local_backup_dir }}"
+    state: directory
+    mode: "0700"
+  delegate_to: localhost
+  become: false
+
+- name: Back up RESTIC_PASSWORD and ADMIN_PASSWORD on the workstation
+  ansible.builtin.copy:
+    content: "{{ generated_secrets[item] }}\n"
+    dest: "{{ local_backups[item] }}"
+    mode: "0600"
+    backup: true
+  loop: [restic_password, admin_password]
+  delegate_to: localhost
+  become: false
+  diff: false
+  no_log: true
 
 # --- Sealing key backup ------------------------------------------------------
 # Losing this key makes every committed secrets.yaml of the instance
@@ -346,9 +444,27 @@
   ansible.builtin.debug:
     msg:
       - "Secrets of {{ org_id }}/{{ env_name }} sealed."
-      - "Admin account e-mail: {{ resolved_secrets.admin_email }} (MAIR-170; the generated ADMIN_PASSWORD is not printed here, see the TODO in this role)"
       - "Written: {{ deploiment_local_path }}/{{ instance_dir }}/secrets.yaml"
-      - "Sealing key: {{ sealing_keys_dir }}/{{ org_id }}-{{ env_name }}.yaml (store it in the team vault)"
-      - "Argo CD deploys them once pushed to {{ deploiment_repo_branch }}:"
-      - "  cd {{ deploiment_local_path }} && git add {{ instance_dir }}/secrets.yaml && git commit -m 'chore({{ env_name }}): seal secrets' && git push"
-      - "{{ env_name }} follows the branch {{ deploiment_env_revisions[env_name] | default(deploiment_repo_branch) }}: unless that is {{ deploiment_repo_branch }}, promote the commit with the Promote workflow of Deploiment."
+      - "Store these in the team vault, nothing can recover them once lost:"
+      - "  sealing key:     {{ sealing_keys_dir }}/{{ org_id }}-{{ env_name }}.yaml"
+      - "  RESTIC_PASSWORD: {{ local_backups.restic_password }}"
+      - "  ADMIN_PASSWORD:  {{ local_backups.admin_password }} (first password of the admin account, MAIR-170)"
+      - >-
+        {{ 'One Deploiment PR with every instance of this run is opened after the last one (secrets_open_pr).'
+           if secrets_open_pr | bool else
+           'Argo CD deploys them once merged into ' ~ deploiment_repo_branch ~ ', which only takes PRs (or re-run with -e secrets_open_pr=true):' }}
+
+- name: Manual Deploiment PR
+  ansible.builtin.debug:
+    msg:
+      - "cd {{ deploiment_local_path }} && git switch -c seal-secrets/{{ org_id }}-{{ env_name }} origin/{{ deploiment_repo_branch }}"
+      - "git add {{ instance_dir }}/secrets.yaml && git commit -m 'chore({{ env_name }}): seal secrets' && git push -u origin HEAD"
+      - "gh pr create --fill --base {{ deploiment_repo_branch }} --reviewer <{{ secrets_pr_reviewers | join(',') }}, minus yourself>"
+  when: not secrets_open_pr | bool
+
+- name: Promotion reminder
+  ansible.builtin.debug:
+    msg: >-
+      {{ env_name }} follows the branch {{ deploiment_env_revisions[env_name] }}:
+      once the PR is merged, promote the commit with the Promote workflow of Deploiment.
+  when: deploiment_env_revisions[env_name] | default(deploiment_repo_branch) != deploiment_repo_branch

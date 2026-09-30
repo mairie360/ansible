@@ -86,14 +86,21 @@ ansible-playbook playbooks/site.yml --limit 'client_example_argocd:client_exampl
 ansible-playbook playbooks/verify.yml
 ```
 
-Then commit and push the generated secrets, which Argo CD deploys from git:
+Argo CD deploys the generated secrets from git, and `Deploiment`'s `main`
+only takes PRs. Either let phase 4 open the PR (`-e secrets_open_pr=true`,
+see [Secrets](#secrets)), or do it by hand (the end of phase 4 prints these
+commands):
 
 ```bash
 cd ../Deploiment
-git add clusters/<org>/instances/<env>/secrets.yaml && git commit && git push
+git switch -c seal-secrets/<org>-<env> origin/main
+git add clusters/<org>/instances/<env>/secrets.yaml
+git commit -m 'chore(<env>): seal secrets' && git push -u origin HEAD
+gh pr create --fill --reviewer <the other team members>
 ```
 
-Until that file is pushed, the pods stay in `CreateContainerConfigError`:
+Until that PR is merged (and, for `staging`/`prod`, promoted with the Promote
+workflow of `Deploiment`), the pods stay in `CreateContainerConfigError`:
 expected, not a bug.
 
 ### Stuck sync operation
@@ -156,19 +163,44 @@ one that reaches the instance API server, through the tunnel. For each instance:
   / `ADMIN_EMAIL`, MAIR-170) is resolved the same way, but is **mandatory**:
   prompted in clear (not hidden), and the play **fails** if it is still empty
   — no instance should keep Database's public template admin account by
-  accident. `seal-secrets.sh` generates the matching `ADMIN_PASSWORD` itself
-  and keeps it on later runs; this role cannot yet read that value back to
-  deposit it on the workstation (tracked in `roles/k8s_instance_secrets/tasks/main.yml`);
+  accident;
+- `RESTIC_PASSWORD` (backup encryption key, MAIR-231) and `ADMIN_PASSWORD`
+  (first password of that administrator account, MAIR-170) are generated,
+  but resolved by the role rather than by `seal-secrets.sh`, so it knows the
+  value it seals: `instance_secrets[<host>].restic_password` /
+  `.admin_password` (to force one, e.g. the `RESTIC_PASSWORD` of the bucket a
+  reinstalled instance restores from), else the value already on the
+  instance, else the backup of an earlier run, else a new one. `--rotate`
+  (`seal_extra_args`) generates a new `RESTIC_PASSWORD`; `ADMIN_PASSWORD` is
+  never rotated;
 - GHCR credentials come from `GHCR_USER` / `GHCR_TOKEN`, else from
   `argocd/ghcr-secret` (phase 2 prompts for it once per group);
-- `secrets.yaml` is copied into the local `Deploiment` checkout, and the
-  instance sealing key into `~/.mairie360/sealing-keys/<org>-<env>.yaml`.
-  Store that key in the team vault: without it, a reinstall makes every
-  committed `secrets.yaml` of the instance undecryptable.
+- `secrets.yaml` is copied into the local `Deploiment` checkout, and three
+  files into `~/.mairie360/` (`local_backup_dir`, mode 700, files mode 600,
+  never printed in the output):
+  - `sealing-keys/<org>-<env>.yaml`: the instance sealing key, without which
+    a reinstall makes every committed `secrets.yaml` undecryptable;
+  - `restic-<org>-<env>.txt`: `RESTIC_PASSWORD`, without which every backup
+    in the bucket is unreadable;
+  - `admin-<org>-<env>.txt`: `ADMIN_PASSWORD`, to hand over to the town hall
+    administrator (changed at first login).
+
+  Store all three in the team vault. A value that changes keeps the previous
+  file next to it (`*.txt.<timestamp>~`);
+- with `-e secrets_open_pr=true`, after the last instance of the run, one PR
+  is opened on `Deploiment` with every re-sealed `secrets.yaml`: a branch
+  `seal-secrets/<date>` cut from `origin/main` in a temporary worktree (the
+  local checkout, its branch and its other changes are left alone), commit
+  `chore(<envs>): seal secrets`, reviewers `secrets_pr_reviewers` minus the
+  author. Needs an authenticated `gh` (checked before sealing anything).
+  Nothing is ever pushed to `main`; no PR when nothing changed.
 
 In CI, pass `-e secrets_prompt=false`: missing secrets are then only reported.
 
 ```bash
+# Seal every instance and open the Deploiment PR
+ansible-playbook playbooks/secrets.yml -e secrets_open_pr=true
+
 # Change a single instance's Resend key
 RESEND_API_KEY=re_xxx ansible-playbook playbooks/secrets.yml --limit mairie360-dev
 

@@ -11,6 +11,9 @@
 #            backup_secret_access_key: xxx
 #            cockpit_token: xxx               # MAIR-131, only when observability.enabled
 #            admin_email: admin@example.org   # MAIR-170, mandatory
+#            # Generated secrets, only to force a value (see below):
+#            restic_password: xxx
+#            admin_password: xxx
 #   2. the environment variable of the controller (same for every instance):
 #      RESEND_API_KEY, S3_ACCESS_KEY, S3_SECRET_KEY, AWS_ACCESS_KEY_ID,
 #      AWS_SECRET_ACCESS_KEY, COCKPIT_TOKEN, ADMIN_EMAIL;
@@ -22,9 +25,15 @@
 # step 3 (this role does not check what the instance already has), and is
 # mandatory — an empty value fails the play instead of being sealed empty,
 # so no instance starts on Database's public template admin account by
-# accident. seal-secrets.sh generates the matching ADMIN_PASSWORD itself and
-# keeps it once set; this role has no way yet to read that generated value
-# back to deposit it on the workstation (see tasks/main.yml).
+# accident.
+#
+# restic_password and admin_password are generated, not external: the role
+# resolves them (instance_secrets, else the value on the instance, else the
+# backup in local_backup_dir, else a new one), passes them to seal-secrets.sh
+# and backs them up in local_backup_dir (see tasks/main.yml). Set them only
+# to force a value, e.g. the RESTIC_PASSWORD of the bucket a reinstalled
+# instance must restore from. They have no environment variable: one value
+# for every instance would share it between them.
 instance_secrets: {}
 
 instance_secret_env:
@@ -40,12 +49,33 @@ instance_secret_env:
 # next to this repo (Devops/ansible + Devops/Deploiment).
 deploiment_local_path: "{{ playbook_dir }}/../../Deploiment"
 
-# Local backup of each instance's sealing key. Outside any git repository:
-# this key decrypts every committed secrets.yaml of the instance.
-sealing_keys_dir: "{{ lookup('ansible.builtin.env', 'HOME') }}/.mairie360/sealing-keys"
+# Workstation directory (mode 0700, outside any git repository) holding what
+# must survive the loss of an instance, to store in the team vault:
+#   restic-<org>-<env>.txt  RESTIC_PASSWORD, without it the backups are unreadable
+#   admin-<org>-<env>.txt   ADMIN_PASSWORD, first password of the admin account
+# Both mode 0600; a changed value keeps the previous file next to it.
+local_backup_dir: "{{ lookup('ansible.builtin.env', 'HOME') }}/.mairie360"
+
+# Local backup of each instance's sealing key: it decrypts every committed
+# secrets.yaml of the instance.
+sealing_keys_dir: "{{ local_backup_dir }}/sealing-keys"
 
 # Extra arguments for seal-secrets.sh. Generated secrets are kept by default;
 # "--rotate-roles" regenerates only the API Postgres role passwords (applied
 # by the next Liquibase sync), "--rotate" regenerates everything (read the
 # warnings in scripts/seal-secrets.sh first: RESTIC_PASSWORD, superuser).
 seal_extra_args: ""
+
+# Open the Deploiment PR automatically (tasks/open_pr.yml, needs git and an
+# authenticated gh on the workstation). After the last instance of the run,
+# every re-sealed secrets.yaml is committed on one branch cut from
+# origin/<deploiment_repo_branch> (a temporary worktree: the local checkout is
+# left as is), pushed, and one PR is opened. Off by default: the summary then
+# shows the commands to do it by hand.
+secrets_open_pr: false
+
+# Reviewers of that PR; the author is dropped from the list.
+secrets_pr_reviewers:
+  - CarolinHugo
+  - LAURETbenjamin
+  - MathTek

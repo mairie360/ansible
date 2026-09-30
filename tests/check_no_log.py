@@ -27,7 +27,10 @@ SECRET_NAME = re.compile(
     re.IGNORECASE,
 )
 # Names that match SECRET_NAME but only hold paths or existence checks.
-SAFE_NAMES = {"argocd_initial_secret", "sealing_keys_dir", "local_instance_dir"}
+SAFE_NAMES = {
+    "argocd_initial_secret", "sealing_keys_dir", "local_instance_dir",
+    "secrets_open_pr", "secrets_pr_reviewers",
+}
 # Files that are secret when read (slurp).
 SECRET_FILE = re.compile(r"(private|k3s\.yaml|kube|secret|token|password|sealing)", re.IGNORECASE)
 # Templates rendered with a secret inside.
