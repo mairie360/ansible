@@ -67,11 +67,11 @@
           `sudo KUBECONFIG=/root/.kube/argocd-cli.yaml argocd app terminate-op <app> --core`,
           then let auto-sync pick up the latest commit.
 
-    - name: Les instances du groupe sont bien enregistrées et étiquetées
+    - name: The instances of the group are registered, labelled and annotated
       ansible.builtin.shell: |
         set -o pipefail
         kubectl -n argocd get secrets -l argocd.argoproj.io/secret-type=cluster,mairie360.fr/role=instance \
-          -o jsonpath='{range .items[*]}{.metadata.labels.mairie360\.fr/env}{"\n"}{end}'
+          -o jsonpath='{range .items[*]}{.metadata.labels.mairie360\.fr/env}{" "}{.metadata.annotations.mairie360\.fr/revision}{"\n"}{end}'
       args:
         executable: /bin/bash
       environment:
@@ -79,14 +79,51 @@
       register: registered
       changed_when: false
 
-    - name: Toutes les instances déclarées sont enregistrées
+    - name: Every declared instance is registered
       ansible.builtin.assert:
         that:
-          - hostvars[item].env_name in registered.stdout_lines
+          - hostvars[item].env_name in registered.stdout_lines | map('split', ' ') | map('first') | list
         fail_msg: >-
-          L'instance {{ item }} (env {{ hostvars[item].env_name }}) n'est pas
-          enregistrée dans cet Argo CD. Relancer la phase 3.
+          Instance {{ item }} (env {{ hostvars[item].env_name }}) is not
+          registered in this Argo CD. Re-run phase 3.
       loop: "{{ groups[org_group ~ '_instances'] | default([]) }}"
+
+    # MAIR-346: Deploiment's bootstrap AppSets read the revision from this
+    # annotation. A wrong or missing one makes cert-manager, the ingress
+    # controller, sealed-secrets and cluster-addons follow the wrong branch.
+    # Only the environments of deploiment_revision_annotated_envs carry it;
+    # the others must not (they follow `main` until prod is promoted).
+    - name: Every instance carries the expected mairie360.fr/revision
+      ansible.builtin.assert:
+        that:
+          - (hostvars[item].env_name ~ ' ' ~ expected) | trim in registered.stdout_lines | map('trim') | list
+        fail_msg: >-
+          Cluster {{ hostvars[item].env_name }} should carry
+          {{ ('mairie360.fr/revision=' ~ expected) if expected | length > 0 else 'no mairie360.fr/revision annotation' }}.
+          Re-run `ansible-playbook playbooks/site.yml --tags labels`.
+      vars:
+        expected: >-
+          {{ (deploiment_env_revisions[hostvars[item].env_name] | default(deploiment_repo_branch))
+             if hostvars[item].env_name in deploiment_revision_annotated_envs else '' }}
+      loop: "{{ groups[org_group ~ '_instances'] | default([]) }}"
+
+    - name: Read the state of the promotion runner (MAIR-346)
+      ansible.builtin.systemd_service:
+        name: gh-runner
+      register: runner_service
+      when: github_runner_enabled | bool
+
+    # "activating" is the normal state between two jobs (prepare.sh registers
+    # the next runner).
+    - name: The promotion runner is running
+      ansible.builtin.assert:
+        that: runner_service.status.ActiveState | default('missing') in ['active', 'activating']
+        fail_msg: >-
+          gh-runner is {{ runner_service.status.ActiveState | default('missing') }} on {{ inventory_hostname }}:
+          Deploiment's Promote workflow cannot verify staging. Provide the GitHub
+          App (GITHUB_RUNNER_APP_ID / GITHUB_RUNNER_APP_PRIVATE_KEY_FILE) and run
+          `site.yml --tags github_runner`, then `journalctl -u gh-runner`.
+      when: github_runner_enabled | bool
 
 - name: "Vérification des instances"
   hosts: "*_instances"
@@ -96,12 +133,26 @@
     # The Deploiment checkout only lives on the Argo CD machine, which also
     # holds a kubeconfig for each instance (phase 3), with a context named
     # after the environment: run verify.sh from there.
+    # MAIR-346: an environment the promotion runner verifies is checked as
+    # the runner user with the runner's least-privilege kubeconfig, exactly
+    # like the Promote workflow does: a missing permission shows up here
+    # rather than as a blocked promotion.
     - name: Full acceptance test of the instance (Deploiment/scripts/verify.sh)
       ansible.builtin.command:
         cmd: "./scripts/verify.sh {{ env_name }} {{ env_name }} {{ instance_domain }}"
         chdir: /opt/Deploiment
       environment:
-        KUBECONFIG: "/root/.kube/instance-{{ env_name }}.yaml"
+        KUBECONFIG: >-
+          {{ ('/home/gh-runner/.kube/instance-' if as_runner | bool else '/root/.kube/instance-') ~ env_name ~ '.yaml' }}
+        # The runner user cannot write to its home: kubectl's cache goes here.
+        KUBECACHEDIR: "/tmp/verify-kube-cache-{{ env_name }}"
+      become: true
+      become_user: "{{ 'gh-runner' if as_runner | bool else 'root' }}"
+      vars:
+        argocd_machine: "{{ groups[org_group ~ '_argocd'][0] }}"
+        as_runner: >-
+          {{ hostvars[argocd_machine].github_runner_enabled | default(false) | bool
+             and env_name in hostvars[argocd_machine].github_runner_verify_envs | default([]) }}
       delegate_to: "{{ groups[org_group ~ '_argocd'][0] }}"
       register: verify
       changed_when: false

@@ -21,15 +21,16 @@ Chaque Argo CD ne pilote que les instances de son groupe, et son tunnel
 WireGuard ne porte que sur ce groupe. Un client compromis n'a aucune route
 réseau vers un autre : l'isolation vient de la topologie.
 
-## The four phases
+## The five phases
 
 | Phase | Role | Target | What it does |
 |---|---|---|---|
 | 1 | `k8s_node` | all | Hardening, firewall (6443 only from the group's Argo CD, over `wg0`), k3s (Traefik disabled, ServiceLB on), Cilium CNI + Hubble |
 | 1b | `wireguard` | all | Group tunnel: the Argo CD machine listens, the instances connect to it |
 | 2 | `k8s_argocd` | `*_argocd` | Argo CD + `platform-app.yaml` + the group's ApplicationSet, `argocd/ghcr-secret`, one `ImageUpdater` per instance |
-| 3 | `k8s_instance_link` | `*_instances` | `argocd cluster add` on the WireGuard IP + labels (`mairie360.fr/role`, `org`, `env`, `ingress`) |
+| 3 | `k8s_instance_link` | `*_instances` | `argocd cluster add` on the WireGuard IP + labels (`mairie360.fr/role`, `org`, `env`, `ingress`) + annotation `mairie360.fr/revision` |
 | 4 | `k8s_instance_secrets` | `*_instances` | Seals the instance secrets with `seal-secrets.sh`, asks for the missing external ones, copies `secrets.yaml` back to the local `Deploiment` checkout |
+| 5 | `github_runner` | `*_argocd` with `github_runner_enabled` | Ephemeral GitHub Actions runner of `Deploiment` and a least-privilege kubeconfig on staging, so the Promote workflow runs `verify.sh` before prod (MAIR-346) |
 
 The `k8s_argocd` role installs **neither** cert-manager, **nor** the ingress
 controller, **nor** a ClusterIssuer: Argo CD deploys them on the instances,
@@ -66,6 +67,109 @@ Argo CD then deletes ingress-nginx from that machine and installs Traefik.
 Flip `global.ingressController` in the instance's `values.yaml` in
 `Deploiment` right after. Rollback: set `ingress_controller: nginx` again (or
 remove it), same command, and revert the values.
+
+## Promotion per environment (MAIR-345, MAIR-346)
+
+Each environment follows its own `Deploiment` branch, set by
+`deploiment_env_revisions` in `inventory/group_vars/all.yml` (`dev` →
+`deploiment_repo_branch`, `staging` → `staging`, `prod` → `prod`). The
+`Promote` workflow of `Deploiment` moves those branches (main → staging →
+prod, fast-forward only). That map is the single source for both layers:
+
+- the **instance chart**: the instances ApplicationSet rendered by phase 2
+  (`roles/k8s_argocd/templates/instances-appset.yaml.j2`) gives each
+  Application its `targetRevision`;
+- the **bootstrap layer** (cert-manager, ingress controller, sealed-secrets,
+  cluster-addons): phase 3 writes the revision on each instance's Argo CD
+  cluster Secret as the annotation `mairie360.fr/revision`, and the
+  `bootstrap/` AppSets of `Deploiment` read it through their clusters
+  generator. A controller version bump therefore reaches prod only through
+  staging. Only the environments of `deploiment_revision_annotated_envs`
+  (default `dev`, `staging`) are annotated; the others follow `main` until
+  they are added (see the rollout below).
+
+After changing `deploiment_env_revisions` or
+`deploiment_revision_annotated_envs`, re-apply:
+
+```bash
+ansible-playbook playbooks/site.yml --limit 'mairie360_argocd:mairie360_instances' --tags labels
+ansible-playbook playbooks/site.yml --limit 'mairie360_argocd:mairie360_instances'   # re-renders the instances AppSet
+ansible-playbook playbooks/verify.yml   # checks every cluster carries the expected annotation
+```
+
+### Rollout of MAIR-346
+
+An annotated cluster reads `bootstrap/addons/` of `Deploiment` at its own
+branch, and that directory only exists on a branch once the MAIR-346 change
+of `Deploiment` has reached it. Annotating `prod` before that would point
+its bootstrap Applications at a path that does not exist yet. Order:
+
+1. Merge the `Deploiment` change on `main` (dev's bootstrap is unchanged: it
+   follows `main` either way).
+2. Promote `Deploiment` to `staging` (Promote workflow, `target=staging`) and
+   sync staging in Argo CD.
+3. Here: annotate `dev` and `staging` and set up the runner (the default
+   `deploiment_revision_annotated_envs`), with the GitHub App variables of
+   the next section:
+   `ansible-playbook playbooks/site.yml --limit 'mairie360_argocd:mairie360_instances' --tags labels,github_runner`,
+   then `ansible-playbook playbooks/verify.yml`.
+4. Promote `Deploiment` to `prod` (`target=prod`): the `verify-staging` job
+   now runs `scripts/verify.sh` on this runner instead of the former
+   checkbox.
+5. Add `prod` to `deploiment_revision_annotated_envs` (PR), then
+   `--tags labels` on every group. Client groups have a `prod` too and the
+   list is global: their `Deploiment` revision is `prod` as well, so they
+   switch at the same time.
+
+### The promotion runner (phase 5)
+
+Promoting to prod requires `scripts/verify.sh` to pass on staging, but
+GitHub-hosted runners cannot reach the instance API servers (6443 is only
+open on the WireGuard tunnel, to the group's Argo CD machine). Phase 5
+(`roles/github_runner`) therefore installs a **self-hosted runner on the
+Argo CD machine**, which already has that route. It is opt-in per group
+(`github_runner_enabled`, only `true` in `group_vars/mairie360_argocd.yml`)
+and never opens anything:
+
+| | |
+|---|---|
+| Registration | Repository level on `mairie360/Deploiment`, labels `self-hosted`, `linux`, `mairie360-argocd-<org_id>`. A workflow targets it with `runs-on: [self-hosted, linux, mairie360-argocd-mairie360]` |
+| Ephemeral | One just-in-time (JIT) registration per job: `gh-runner.service` registers, runs one job, exits and systemd restarts it. Before every job the runner directory is re-copied from the pinned release and its `HOME` (`/var/lib/gh-runner/home`) emptied, so nothing a job writes survives |
+| User | `gh-runner`, non-root system user, no login shell, cannot write to `/home/gh-runner`. The systemd unit is sandboxed (`ProtectSystem=strict`, `NoNewPrivileges`, `PrivateTmp`, no access to `/root` nor `/etc/gh-runner`) |
+| Network | Outbound HTTPS to GitHub only: no inbound port, no firewall or WireGuard change. The unit's `IPAddressDeny` blocks the tunnel subnet and this machine's pod and Service networks (Argo CD), except the WireGuard IPs of the verified instances |
+| Instance access | For each env of `github_runner_verify_envs` (default `staging`): ServiceAccount `mairie360-ci/verify-runner` with exactly the rules listed at the top of `Deploiment/scripts/verify.sh` (no Secret read, no exec; mapped to its steps in `roles/github_runner/templates/verify-rbac.yaml.j2`), plus a `ValidatingAdmissionPolicy` that only lets it create, attach to and delete `verify-probe-*` pods of image `curlimages/curl:8.10.1` with no volume, env nor token. Kubeconfig: `/home/gh-runner/.kube/instance-<env>.yaml` (root:gh-runner, 0440, one context `<env>`, current). The admin kubeconfigs of `/root/.kube/` are never readable by the runner |
+| Version | `github_runner_version` + `github_runner_sha256` in `inventory/group_vars/all.yml`. GitHub stops sending jobs to a runner more than 30 days behind: bump it at least monthly |
+
+**Registration credential.** A GitHub App installed on `mairie360/Deploiment`
+with the single repository permission **Administration: Read and write**.
+Each job needs a new registration, so the App key stays on the machine, in
+`/etc/gh-runner/app.pem` (root, 0600), read only by the root pre-start step
+(`/usr/local/lib/gh-runner/prepare.sh`), which mints an installation token
+scoped to that repository and permission, requests the JIT config and
+revokes the token. Provide it once, the next runs keep it:
+
+```bash
+GITHUB_RUNNER_APP_ID=123456 GITHUB_RUNNER_APP_PRIVATE_KEY_FILE=~/keys/mairie360-runner.pem \
+  ansible-playbook playbooks/site.yml --limit 'mairie360_argocd:mairie360_instances' --tags github_runner
+```
+
+Without them (and without a key already on the machine), the play prompts
+for the App ID and the key path; empty skips, and the runner is installed
+but not started. Replace the key the same way; rotate the ServiceAccount
+token by deleting `mairie360-ci/verify-runner-token` on the instance and
+re-running `--tags github_runner`.
+
+**Public repository.** `Deploiment` is public: only `workflow_dispatch`
+workflows may target this runner (today: the `verify-staging` job of
+`promote.yaml`), never `pull_request`, and the repo
+setting *Actions → Fork pull request workflows* must require approval for
+all outside collaborators. The sandbox and the admission policy bound what a
+hijacked job could do, but they are a second line, not the first.
+
+`playbooks/verify.yml` runs `verify.sh` on those environments **as
+`gh-runner` with its kubeconfig**, like the Promote workflow does, and fails
+when `gh-runner.service` is not active. On the machine:
+`journalctl -u gh-runner` (one "registered ephemeral runner" line per job).
 
 ## Usage
 

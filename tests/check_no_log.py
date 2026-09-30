@@ -31,7 +31,7 @@ SAFE_NAMES = {"argocd_initial_secret", "sealing_keys_dir", "local_instance_dir"}
 # Files that are secret when read (slurp).
 SECRET_FILE = re.compile(r"(private|k3s\.yaml|kube|secret|token|password|sealing)", re.IGNORECASE)
 # Templates rendered with a secret inside.
-SECRET_TEMPLATES = {"wg0.conf.j2"}
+SECRET_TEMPLATES = {"wg0.conf.j2", "runner-kubeconfig.yaml.j2"}
 
 TASK_KEYS = ("block", "rescue", "always", "tasks", "pre_tasks", "post_tasks", "handlers")
 
