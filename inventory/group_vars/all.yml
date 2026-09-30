@@ -13,10 +13,32 @@ deploiment_repo_branch: "main"
 # only move through the "Promote" workflow of Deploiment (main -> staging ->
 # prod, fast-forward only). An environment missing from this map falls back
 # to deploiment_repo_branch. Re-run the k8s_argocd role after changing it.
+#
+# MAIR-346: this map is also written on each instance's Argo CD cluster
+# Secret as the annotation `mairie360.fr/revision` (role k8s_instance_link,
+# `site.yml --tags labels`), for the environments of
+# deploiment_revision_annotated_envs below. Deploiment's bootstrap/ AppSets
+# (cert-manager, ingress controller, sealed-secrets, cluster-addons) read it
+# through their clusters generator, so a bootstrap version bump reaches
+# staging and prod only once promoted, like the instance chart. Re-run
+# `site.yml --tags labels` too after changing it.
 deploiment_env_revisions:
   dev: "{{ deploiment_repo_branch }}"
   staging: "staging"
   prod: "prod"
+
+# Environments whose cluster Secret carries the mairie360.fr/revision
+# annotation (MAIR-346); the others have none, and Deploiment's bootstrap
+# AppSets fall back to `main` for them. Rollout constraint: an annotated
+# cluster reads Deploiment's bootstrap/addons/ at its branch, and that
+# directory only exists on a branch once the MAIR-346 Deploiment change has
+# been promoted to it. So `prod` (every group's prod, clients included, since
+# this list is global) is added only after Deploiment has been promoted to
+# prod — README, "Rollout of MAIR-346". Removing an env from the list removes
+# its annotation on the next `--tags labels` run.
+deploiment_revision_annotated_envs:
+  - dev
+  - staging
 
 # Environments whose Application syncs automatically (prune + selfHeal). The
 # others are synced by hand from Argo CD, which keeps a first deployment or a
@@ -71,6 +93,13 @@ cilium_version: "1.20.2"
 cilium_cli_version: "v0.20.0"
 hubble_cli_version: "v1.19.4"
 
+# GitHub Actions runner (role github_runner, MAIR-346). The tarball is
+# checked against this sha256 (the "BEGIN SHA linux-x64" line of the release
+# notes of actions/runner). GitHub stops sending jobs to a runner more than
+# 30 days behind the latest release: bump both values at least monthly.
+github_runner_version: "2.337.0"
+github_runner_sha256: "70920811a4f8ad4328818682bca5c6469c1c942fab52448868071d0063816613"
+
 # kubeseal client, installed on each Argo CD machine (role
 # k8s_instance_secrets). Matches the appVersion of the sealed-secrets chart
 # pinned in Deploiment/bootstrap/appsets/sealed-secrets-appset.yaml (2.17.3).
@@ -87,3 +116,17 @@ ghcr_token: "{{ lookup('ansible.builtin.env', 'GHCR_TOKEN') }}"
 # the cluster. Set to false in CI (-e secrets_prompt=false): missing secrets
 # are then only reported.
 secrets_prompt: true
+
+# Self-hosted GitHub Actions runner of the group's Argo CD machine (role
+# github_runner, MAIR-346). It lets Deploiment's "Promote" workflow run
+# scripts/verify.sh against staging before moving `prod`: GitHub-hosted
+# runners have no route to the instance API servers. Opt-in per group
+# (enabled in group_vars/mairie360_argocd.yml only: a client group has no
+# staging to verify and does not promote).
+github_runner_enabled: false
+# Environments the runner may verify. For each one, a least-privilege
+# ServiceAccount is created on that instance and its kubeconfig written to
+# /home/gh-runner/.kube/instance-<env>.yaml. The runner's network is limited
+# to these instances' WireGuard IPs (no route to the other instances).
+github_runner_verify_envs:
+  - staging

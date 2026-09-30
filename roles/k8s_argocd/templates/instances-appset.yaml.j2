@@ -55,7 +55,10 @@ spec:
       # branches the "Promote" workflow of Deploiment advances. The git
       # generator above still lists directories on {{ deploiment_repo_branch }}
       # only, so a new environment directory must be promoted before its
-      # Application can render.
+      # Application can render. The same map is written on each instance's
+      # cluster Secret as the annotation mairie360.fr/revision (role
+      # k8s_instance_link, MAIR-346), which Deploiment's bootstrap AppSets
+      # follow: keep both on deploiment_env_revisions.
       source:
         repoURL: {{ deploiment_repo_url }}
         targetRevision: '{% raw %}{{ index (dict{% endraw %}{% for env, rev in deploiment_env_revisions.items() %} {{ env | to_json }} {{ rev | to_json }}{% endfor %}{% raw %}) .path.basename | default {% endraw %}{{ deploiment_repo_branch | to_json }}{% raw %} }}{% endraw %}'

@@ -1,0 +1,133 @@
+---
+# One verified instance (github_runner_target: host, env_name, wg_ip). Applied with
+# the instance's admin kubeconfig written by phase 3 (root only); the runner
+# only ever gets the ServiceAccount kubeconfig produced here.
+
+- name: "Admin kubeconfig from phase 3 is present ({{ github_runner_target.env_name }})"
+  ansible.builtin.stat:
+    path: "/root/.kube/instance-{{ github_runner_target.env_name }}.yaml"
+  register: github_runner_admin_kubeconfig_stat
+
+- name: "Fail when the instance is not linked yet ({{ github_runner_target.env_name }})"
+  ansible.builtin.assert:
+    that: github_runner_admin_kubeconfig_stat.stat.exists
+    fail_msg: >-
+      /root/.kube/instance-{{ github_runner_target.env_name }}.yaml is missing: run
+      phase 3 (role k8s_instance_link) on {{ github_runner_target.host }} first.
+
+- name: "Set the facts of this instance ({{ github_runner_target.env_name }})"
+  ansible.builtin.set_fact:
+    github_runner_env: "{{ github_runner_target.env_name }}"
+    github_runner_env_wg_ip: "{{ github_runner_target.wg_ip }}"
+    github_runner_admin_kubeconfig_path: "/root/.kube/instance-{{ github_runner_target.env_name }}.yaml"
+
+# The Role must live in the instance namespace, which Argo CD only creates on
+# the first sync (CreateNamespace=true). Creating it ahead is harmless: Argo
+# CD adopts an existing namespace.
+- name: "Make sure the instance namespace exists ({{ github_runner_env }})"
+  ansible.builtin.shell: |
+    set -o pipefail
+    kubectl get namespace "mairie360-{{ github_runner_env }}" >/dev/null 2>&1 \
+      || kubectl create namespace "mairie360-{{ github_runner_env }}"
+  args:
+    executable: /bin/bash
+  environment:
+    KUBECONFIG: "{{ github_runner_admin_kubeconfig_path }}"
+  register: github_runner_ns
+  changed_when: "'created' in github_runner_ns.stdout"
+
+- name: "Render the runner's RBAC ({{ github_runner_env }})"
+  ansible.builtin.template:
+    src: verify-rbac.yaml.j2
+    dest: "/opt/gh-runner/verify-rbac-{{ github_runner_env }}.yaml"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: "Apply the runner's RBAC ({{ github_runner_env }})"
+  ansible.builtin.command: "kubectl apply -f /opt/gh-runner/verify-rbac-{{ github_runner_env }}.yaml"
+  environment:
+    KUBECONFIG: "{{ github_runner_admin_kubeconfig_path }}"
+  register: github_runner_rbac_apply
+  changed_when: "'created' in github_runner_rbac_apply.stdout or 'configured' in github_runner_rbac_apply.stdout"
+
+- name: "Write the runner's kubeconfig ({{ github_runner_env }})"
+  ansible.builtin.include_tasks: sa_kubeconfig.yml
+  vars:
+    github_runner_kc_sa_namespace: "{{ github_runner_sa_namespace }}"
+    github_runner_kc_dest: "/home/{{ github_runner_user }}/.kube/instance-{{ github_runner_env }}.yaml"
+    github_runner_kc_context: "{{ github_runner_env }}"
+    github_runner_kc_server: "https://{{ github_runner_env_wg_ip }}:6443"
+    github_runner_kc_namespace: "mairie360-{{ github_runner_env }}"
+    github_runner_kc_user: "{{ github_runner_sa_namespace }}/{{ github_runner_sa_name }}@{{ github_runner_env }}"
+
+# Self-test of the policy with server-side dry runs (admission runs, nothing
+# is created): a verify.sh probe is accepted, anything else is refused.
+- name: "The runner may create a verify.sh probe pod ({{ github_runner_env }})"
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - --kubeconfig
+      - "/home/{{ github_runner_user }}/.kube/instance-{{ github_runner_env }}.yaml"
+      - run
+      - "{{ github_runner_probe_prefix }}allow"
+      - "--image={{ github_runner_probe_image }}"
+      - --labels=app.kubernetes.io/component=bff
+      - --restart=Never
+      - '--overrides={"apiVersion":"v1","spec":{"automountServiceAccountToken":false}}'
+      - --dry-run=server
+      - --
+      - curl
+      - -sf
+      - "http://{{ github_runner_env }}-core-api:3000/health"
+  register: github_runner_probe_allowed
+  changed_when: false
+
+- name: "The runner may not create any other pod ({{ github_runner_env }})"
+  ansible.builtin.command:
+    argv: "{{ ['kubectl', '--kubeconfig', '/home/' ~ github_runner_user ~ '/.kube/instance-' ~ github_runner_env ~ '.yaml',
+               'run', item.name, '--image=' ~ item.image, '--restart=Never', '--dry-run=server']
+              + item.extra + ['--', 'id'] }}"
+  vars:
+    no_token: '--overrides={"apiVersion":"v1","spec":{"automountServiceAccountToken":false}}'
+    probe: "{{ github_runner_probe_prefix }}x"
+  loop:
+    # another image
+    - { name: "{{ probe }}", image: "alpine:3", extra: ["{{ no_token }}"] }
+    # a service account token mounted
+    - { name: "{{ probe }}", image: "{{ github_runner_probe_image }}", extra: [] }
+    # not a probe name
+    - { name: "not-a-probe", image: "{{ github_runner_probe_image }}", extra: ["{{ no_token }}"] }
+    # impersonating an API (reaches Postgres)
+    - { name: "{{ probe }}", image: "{{ github_runner_probe_image }}", extra: ["--labels=app.kubernetes.io/component=api", "{{ no_token }}"] }
+    # env
+    - { name: "{{ probe }}", image: "{{ github_runner_probe_image }}", extra: ["--env=A=b", "{{ no_token }}"] }
+  loop_control:
+    label: "{{ item.name }} {{ item.image }} {{ item.extra | join(' ') }}"
+  register: github_runner_probe_denied
+  changed_when: false
+  failed_when: >-
+    github_runner_probe_denied.rc == 0
+    or 'ValidatingAdmissionPolicy' not in github_runner_probe_denied.stderr
+
+- name: "The runner has no access beyond verify.sh ({{ github_runner_env }})"
+  ansible.builtin.command: >-
+    kubectl --kubeconfig /home/{{ github_runner_user }}/.kube/instance-{{ github_runner_env }}.yaml
+    auth can-i {{ item }}
+  loop:
+    - "get secrets -n mairie360-{{ github_runner_env }}"
+    - "list secrets -n mairie360-{{ github_runner_env }}"
+    # `pods/exec` would be read as "the pod named exec": use --subresource.
+    - "create pods --subresource=exec -n mairie360-{{ github_runner_env }}"
+    - "get pods/{{ github_runner_env }}-core-api --subresource=log -n mairie360-{{ github_runner_env }}"
+    - "get sealedsecrets.bitnami.com/not-an-instance-secret -n mairie360-{{ github_runner_env }}"
+    - "list sealedsecrets.bitnami.com -n mairie360-{{ github_runner_env }}"
+    - "create deployments -n mairie360-{{ github_runner_env }}"
+    - "patch deployments -n mairie360-{{ github_runner_env }}"
+    - "get pods -n kube-system"
+    - "get secrets -n kube-system"
+    - "create pods -n kube-system"
+  register: github_runner_can_i
+  changed_when: false
+  # `can-i` exits 1 and prints "no" when denied.
+  failed_when: github_runner_can_i.stdout | trim != 'no'
