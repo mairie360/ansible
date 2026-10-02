@@ -34,7 +34,11 @@ spec:
     metadata:
       name: '{% raw %}{{ .path.basename }}{% endraw %}'
     spec:
-      project: default
+      # MAIR-414: Deploiment's bootstrap/appsets/projects.yaml (this repo
+      # only, mairie360-* namespaces, no cluster-scoped kind but Namespace
+      # and the collector's ClusterRole/Binding). It must exist before this
+      # AppSet is applied: Deploiment main first, then this role.
+      project: mairie360-instances
       # SINGLE source on purpose: chart and values come from the same repo at
       # the same revision. The previous multi-source layout (chart + a `ref:`
       # source feeding $values, both on {{ deploiment_repo_branch }}) resolved
@@ -65,6 +69,10 @@ spec:
           # dev- / staging- / prod-.
           releaseName: '{% raw %}{{ .path.basename }}{% endraw %}'
           valueFiles:
+            # Shared by every instance of this environment, whatever its
+            # group (MAIR-414): clusters/_base/prod.yaml holds the versions
+            # and settings of every prod. Missing for dev/staging.
+            - '../../clusters/_base/{% raw %}{{ .path.basename }}{% endraw %}.yaml'
             - '../../{% raw %}{{ .path.path }}{% endraw %}/values.yaml'
             # Instance SealedSecret, produced by scripts/seal-secrets.sh.
             # Missing until it is generated: ignoreMissingValueFiles keeps
