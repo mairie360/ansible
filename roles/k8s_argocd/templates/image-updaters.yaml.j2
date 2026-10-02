@@ -11,8 +11,9 @@
 # write_back argocd: the new tags go into the Application's Helm parameters
 # (no git commit). The ApplicationSet ignores that field
 # (ignoreApplicationDifferences), so the next sync does not revert them.
-# write_back git: a pull request on {{ deploiment_repo_url }}
-# ({{ deploiment_repo_branch }}) that edits the instance's values.yaml.
+# write_back git (MAIR-444): a pull request on {{ deploiment_repo_url }}
+# ({{ deploiment_repo_branch }}), or a direct commit on the policy's branch,
+# editing clusters/{{ org_id }}/instances/<env>/<target>.
 #
 # Registry credentials come from the chart config of
 # Deploiment/bootstrap/appsets/image-updater-app.yaml (pullsecret:argocd/ghcr-secret).
@@ -34,11 +35,18 @@ spec:
     method: "git:secret:argocd/deploiment-git-creds"
     gitConfig:
       repository: {{ deploiment_repo_url | to_json }}
+{% if policy.pull_request | default(true) %}
       # Base branch of the pull requests (PR mode takes no "base:target").
       branch: {{ deploiment_repo_branch | to_json }}
-      writeBackTarget: {{ ('helmvalues:/clusters/' ~ org_id ~ '/instances/' ~ env ~ '/values.yaml') | to_json }}
+{% else %}
+      # Commits pushed straight onto this branch.
+      branch: {{ policy.branch | to_json }}
+{% endif %}
+      writeBackTarget: {{ ('helmvalues:/clusters/' ~ org_id ~ '/instances/' ~ env ~ '/' ~ (policy.target | default('values.yaml'))) | to_json }}
+{% if policy.pull_request | default(true) %}
       pullRequest:
         github: {}
+{% endif %}
 {% else %}
     method: argocd
 {% endif %}

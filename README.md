@@ -417,18 +417,27 @@ sudo k3s secrets-encrypt status   # on a machine: "Encryption Status: Enabled"
 
 | Environment | Who moves the image tags | Where they live |
 |---|---|---|
-| `dev` | argocd-image-updater, newest `dev-<sha>` | Application parameters (outside git) |
-| `staging` | argocd-image-updater, newest `staging-<sha>`, as a **pull request** on `Deploiment` `main` | `clusters/<org>/instances/staging/values.yaml`, deployed once merged and promoted to `staging` |
+| `dev` | argocd-image-updater, newest `dev-<sha>`, as a **pull request** on `Deploiment` `main`, auto-merged once CI passes | `clusters/<org>/instances/dev/values.yaml`, deployed by dev's auto-sync |
+| `staging` | argocd-image-updater, newest `staging-<sha>`, as a **commit on the `staging` branch** | `clusters/<org>/instances/staging/images.yaml` (staging branch only), deployed by staging's auto-sync |
 | `prod`, client instances | nobody: no `ImageUpdater` | `clusters/<org>/instances/<env>/values.yaml`, promoted `main` -> `staging` -> `prod` like any change |
 
 The policies are `image_updater_policies` (`roles/k8s_argocd/defaults/main.yml`):
 an environment that is not listed is never touched by argocd-image-updater.
+Since MAIR-444 every tracked image includes `database` (the Postgres server:
+a new tag restarts it) and `liquibase-migrations` (applied by the next sync),
+and dev and staging both write back to git: what runs there is in git. The
+staging commits never touch `main`; Deploiment's `Promote` merges `main` into
+`staging` while `staging` is ahead by those commits only (Deploiment ADR 0002,
+amendment). Both environments sync by themselves
+(`deploiment_auto_sync_envs`).
 Prod therefore runs the exact combination of tags committed in `Deploiment`,
 reviewed and promoted through staging, and a `Promote` rollback also rolls the
 images back.
 
-The staging pull requests need `argocd/deploiment-git-creds`: a fine-grained
-token on `mairie360/Deploiment` with contents and pull requests read/write,
+The dev pull requests and the staging commits need
+`argocd/deploiment-git-creds`: a fine-grained token on `mairie360/Deploiment`
+with contents and pull requests read/write (the `staging` ruleset only forbids
+force-push and deletion, so the commits go through),
 from `DEPLOIMENT_GIT_USER` / `DEPLOIMENT_GIT_TOKEN`, else kept from the
 machine, else prompted (phase 2).
 
@@ -442,9 +451,13 @@ promote), then remove them:
 ansible-playbook playbooks/site.yml --ask-vault-pass --limit 'mairie360_argocd:mairie360_instances' -e image_updater_clear_parameters=true
 ```
 
-prod and staging are synced by hand: nothing changes on the cluster until the
-next sync, which then applies `values.yaml`. Check the Argo CD diff shows no
-image change before syncing.
+prod is synced by hand: nothing changes on the cluster until the next sync,
+which then applies `values.yaml`. Check the Argo CD diff shows no image change
+before syncing. **MAIR-444:** dev and staging switch from `argocd` to `git`
+write-back: run the same command once to drop their parameters. dev and
+staging briefly fall back on the tags of their `values.yaml`, until the next
+image-updater pass commits the newest ones (a PR for dev, a commit for
+staging).
 
 ## Instance kubeconfigs on the Argo CD machine
 
