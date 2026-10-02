@@ -1,6 +1,6 @@
 ---
 # =============================================================================
-# Déploiement complet — toutes les machines, tous les groupes.
+# Full deployment — every machine, every group.
 #
 #   ansible-playbook playbooks/site.yml
 #   ansible-playbook playbooks/site.yml --limit mairie360_argocd:mairie360_instances
@@ -14,24 +14,32 @@
 # adding a client needs NO change here. Always --limit whole groups
 # (<org>_argocd:<org>_instances): the WireGuard phase needs every machine of
 # the group.
+#
+# Ansible connects through the WireGuard tunnel (MAIR-415). A new machine, or
+# a group without an admin peer yet, needs one bootstrap run through the
+# public IPs: add -e ssh_via_public_ip=true (README, "SSH access"). The vault
+# holding the public IPs is always needed: --ask-vault-pass.
 # =============================================================================
 
-- name: "Phase 1 — socle système et k3s (toutes les machines)"
+- name: "Preflight"
+  ansible.builtin.import_playbook: preflight.yml
+
+- name: "Phase 1 — system base and k3s (every machine)"
   hosts: "*_argocd:*_instances"
   become: true
   roles:
     - role: k8s_node
-      # Seules les instances exposent du HTTP(S) : ce sont elles qui portent
-      # les fronts. La machine Argo CD n'expose rien publiquement.
+      # Only the instances expose HTTP(S): they run the fronts. The Argo CD
+      # machine exposes nothing publicly.
       node_public_ports: "{{ ['80', '443'] if inventory_hostname in groups[org_group ~ '_instances'] | default([]) else [] }}"
 
-- name: "Phase 1b — tunnel WireGuard du groupe"
+- name: "Phase 1b — WireGuard tunnel of the group"
   hosts: "*_argocd:*_instances"
   become: true
   roles:
     - wireguard
 
-- name: "Phase 2 — Argo CD du groupe"
+- name: "Phase 2 — Argo CD of the group"
   hosts: "*_argocd"
   become: true
   # One group at a time: the GHCR credentials prompt is asked per group.
@@ -39,7 +47,7 @@
   roles:
     - k8s_argocd
 
-- name: "Phase 3 — liaison des instances à leur Argo CD"
+- name: "Phase 3 — link the instances to their Argo CD"
   hosts: "*_instances"
   become: true
   roles:

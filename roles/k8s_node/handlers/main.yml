@@ -1,5 +1,11 @@
-- name: Redémarrer k3s
+- name: Restart k3s
   ansible.builtin.systemd:
     name: k3s
     state: restarted
     daemon_reload: true
+
+# try-reload-or-restart: a no-op when ssh.service is not running (socket
+# activated sshd reads its configuration on every connection anyway).
+- name: Reload sshd
+  ansible.builtin.command: systemctl try-reload-or-restart ssh.service  # noqa: command-instead-of-module (no try-reload in the systemd module)
+  changed_when: true

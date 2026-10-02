@@ -1,0 +1,16 @@
+# Variables of group mairie360 (its Argo CD and its instances).
+
+# Must match the clusters/<org_id>/ folder of the Deploiment repo.
+org_id: mairie360
+
+# Admin workstations allowed into the group's WireGuard tunnel (MAIR-415).
+# Each one is a peer of the Argo CD machine, which routes it to the instances
+# (SSH only). Ansible connects through this tunnel: without at least one peer
+# here, only a bootstrap run (-e ssh_via_public_ip=true) can reach the
+# machines. Pick wg_ip in 10.10.0.100-199, one per workstation, and keep the
+# private key on the workstation (README, "SSH access").
+#
+#   - name: quentin                     # free text, shown in wg0.conf
+#     public_key: "<wg pubkey output>"  # public key: safe to commit
+#     wg_ip: "10.10.0.101"
+wireguard_admin_peers: []

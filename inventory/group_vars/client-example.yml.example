@@ -1,0 +1,9 @@
+# Template: copy to group_vars/<org_group>.yml (underscores, e.g.
+# client_example.yml), the file Ansible loads for the parent group.
+
+# Keeps the dashes: must match the clusters/<org_id>/ folder of Deploiment.
+org_id: client-example
+
+# Admin workstations of this group's tunnel (see group_vars/mairie360.yml).
+# wg_ip in the group's own subnet, e.g. 10.10.1.100-199.
+wireguard_admin_peers: []

@@ -1,5 +1,7 @@
-- name: Redémarrer WireGuard
+# `reload` applies wg0.conf with `wg syncconf`: the interface stays up, so the
+# SSH session Ansible runs through the tunnel survives a peer change. A
+# restart would drop it mid-run. An Address change needs a manual restart.
+- name: Reload WireGuard
   ansible.builtin.systemd:
     name: "wg-quick@wg0"
-    state: restarted
-    enabled: true
+    state: reloaded

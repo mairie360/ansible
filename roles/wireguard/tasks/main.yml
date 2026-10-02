@@ -1,12 +1,16 @@
 ---
 # =============================================================================
-# WireGuard — un tunnel PAR GROUPE.
+# WireGuard — one tunnel PER GROUP.
 #
-# L'Argo CD du groupe est le serveur (il écoute) ; chaque instance du groupe
-# initie une connexion sortante vers lui. Aucun maillage global : l'Argo CD
-# d'un client n'a aucune route réseau vers les instances d'un autre groupe.
+# The group's Argo CD is the server (it listens); every instance of the group
+# opens an outbound connection to it. No global mesh: a client's Argo CD has
+# no network route to another group's instances.
 #
-# C'est ce tunnel qui permet de fermer le port 6443 et le SSH publics.
+# The admin workstations (wireguard_admin_peers) are peers of the server too,
+# which routes them to the instances, SSH only (MAIR-415). Instances cannot
+# reach each other through it: the server forwards nothing else.
+#
+# This tunnel is what keeps ports 6443 and 22 closed publicly.
 # =============================================================================
 
 # The server's wg0.conf lists one peer per instance of the group, built from
@@ -25,14 +29,30 @@
          | difference(ansible_play_hosts_all) | join(', ') }}.
       Use --limit '{{ org_group }}_argocd:{{ org_group }}_instances'.
 
-- name: Installer WireGuard
+# An admin IP outside the group's /24 would get no route (wg-quick only adds
+# the route of `Address`), and one taken by a machine would steal its traffic.
+- name: Check the admin peers
+  ansible.builtin.assert:
+    that:
+      - item.name is defined and item.public_key is defined and item.wg_ip is defined
+      - item.wg_ip is match((wg_ip.split('.')[:3] | join('[.]')) ~ '[.][0-9]+$')
+      - item.wg_ip not in (groups[org_group ~ '_argocd'] + groups[org_group ~ '_instances'] | default([])) | map('extract', hostvars, 'wg_ip') | list
+    fail_msg: >-
+      wireguard_admin_peers of group '{{ org_id }}': each entry needs name,
+      public_key and a wg_ip inside {{ wg_ip.split('.')[:3] | join('.') }}.0/24
+      that no machine uses. Got {{ item }}.
+  loop: "{{ wireguard_admin_peers }}"
+  loop_control:
+    label: "{{ item.name | default(item) }}"
+
+- name: Install WireGuard
   ansible.builtin.apt:
     name: wireguard
     state: present
     update_cache: true
     cache_valid_time: 3600
 
-- name: Générer la clé privée si elle n'existe pas
+- name: Generate the private key when missing
   ansible.builtin.shell: |
     set -o pipefail
     umask 077 && wg genkey > /etc/wireguard/private.key
@@ -40,7 +60,7 @@
     executable: /bin/bash
     creates: /etc/wireguard/private.key
 
-- name: Dériver la clé publique
+- name: Derive the public key
   ansible.builtin.shell: |
     set -o pipefail
     wg pubkey < /etc/wireguard/private.key > /etc/wireguard/public.key
@@ -54,7 +74,7 @@
   register: wg_private
   no_log: true
 
-- name: Lire la clé publique
+- name: Read the public key
   ansible.builtin.slurp:
     src: /etc/wireguard/public.key
   register: wg_public
@@ -65,11 +85,11 @@
     wg_public_key: "{{ wg_public.content | b64decode | trim }}"
   no_log: true
 
-# Les deux facts ci-dessus sont lisibles via hostvars par les autres hôtes du
-# play : c'est ce qui permet au serveur de connaître les clés publiques de ses
-# pairs sans les stocker sur le contrôleur.
+# Both facts above are readable through hostvars by the other hosts of the
+# play: that is how the server learns its peers' public keys without storing
+# them on the controller.
 
-- name: Écrire la configuration WireGuard
+- name: Write the WireGuard configuration
   ansible.builtin.template:
     src: wg0.conf.j2
     dest: /etc/wireguard/wg0.conf
@@ -79,9 +99,9 @@
   # wg0.conf embeds the private key: no diff, no logged arguments.
   diff: false
   no_log: true
-  notify: Redémarrer WireGuard
+  notify: Reload WireGuard
 
-- name: Ouvrir le port WireGuard (serveur du groupe uniquement)
+- name: Open the WireGuard port (group server only)
   community.general.ufw:
     rule: allow
     port: "{{ wg_port }}"
@@ -89,35 +109,53 @@
     comment: "WireGuard"
   when: inventory_hostname in groups[org_group ~ '_argocd']
 
-- name: Activer WireGuard
+- name: Enable WireGuard
   ansible.builtin.systemd:
     name: "wg-quick@wg0"
     state: started
     enabled: true
     daemon_reload: true
 
-- name: Appliquer immédiatement un changement de configuration
+- name: Apply a configuration change right away
   ansible.builtin.meta: flush_handlers
 
-# --- Fermeture du SSH public --------------------------------------------------
-# Seulement quand wireguard_close_public_ssh=true ET que le tunnel répond.
+# --- Admin peers: routed to the instances, SSH only ---------------------------
+# The server forwards wg0 -> wg0 for the admin peers' SSH only. UFW's routed
+# policy stays deny, so instance-to-instance traffic is still dropped.
+# A peer removed from wireguard_admin_peers loses its key in wg0.conf, which
+# is enough to cut it; its stale UFW rules are harmless (`ufw status
+# numbered` + `ufw delete` to tidy them).
 
-- name: Vérifier que le tunnel répond avant de fermer le SSH public
-  ansible.builtin.command: "ping -c 2 -W 2 {{ hostvars[groups[org_group ~ '_argocd'][0]].wg_ip }}"
-  register: wg_ping
-  changed_when: false
-  failed_when: false
-  when:
-    - wireguard_close_public_ssh | bool
-    - inventory_hostname not in groups[org_group ~ '_argocd']
+- name: Enable IPv4 forwarding on the server
+  ansible.posix.sysctl:
+    name: net.ipv4.ip_forward
+    value: "1"
+    sysctl_file: /etc/sysctl.d/99-wireguard.conf
+    reload: true
+  when: inventory_hostname in groups[org_group ~ '_argocd']
 
-- name: Fermer le SSH public
+- name: Route the admin peers to the instances' SSH
   community.general.ufw:
     rule: allow
+    route: true
+    interface_in: wg0
+    interface_out: wg0
+    from_ip: "{{ item.0.wg_ip }}"
+    to_ip: "{{ hostvars[item.1].wg_ip }}"
     port: "22"
     proto: tcp
-    comment: "SSH public - retire par le role wireguard"
-    delete: true
-  when:
-    - wireguard_close_public_ssh | bool
-    - inventory_hostname in groups[org_group ~ '_argocd'] or wg_ping.rc | default(1) == 0
+    comment: "admin {{ item.0.name }} -> {{ item.1 }} SSH"
+  loop: "{{ wireguard_admin_peers | product(groups[org_group ~ '_instances'] | default([])) | list }}"
+  loop_control:
+    label: "{{ item.0.name }} -> {{ item.1 }}"
+  when: inventory_hostname in groups[org_group ~ '_argocd']
+
+- name: Show the peer block of an admin workstation's configuration
+  ansible.builtin.debug:
+    msg:
+      - "[Peer] for the admin workstations of group {{ org_id }} (README, \"SSH access\"):"
+      - "PublicKey = {{ wg_public_key }}"
+      - "Endpoint = <public IP of {{ inventory_hostname }}, vault_public_ips>:{{ wg_port }}"
+      - "AllowedIPs = {{ wg_ip.split('.')[:3] | join('.') }}.0/24"
+      - "PersistentKeepalive = 25"
+  when: inventory_hostname in groups[org_group ~ '_argocd']

@@ -1,0 +1,4 @@
+# Lifetime of the token in /root/.kube/instance-<env>.yaml on the Argo CD
+# machine (tasks/kubeconfig.yml). Long enough for one site.yml run; every
+# playbook that needs it writes a fresh one.
+instance_ops_token_duration: 2h

@@ -233,6 +233,100 @@
       list tags, image tags will not be updated automatically.
   when: ghcr_resolved_token | length == 0
 
+# --- Deploiment write credentials (argocd/deploiment-git-creds) ---------------
+# Read by argocd-image-updater for the environments with `write_back: git`
+# (image_updater_policies): it pushes a branch and opens a pull request on
+# Deploiment. Only asked when such an environment exists in the group.
+
+- name: List the environments with a git write-back
+  ansible.builtin.set_fact:
+    image_updater_git_envs: >-
+      {{ groups[org_group ~ '_instances'] | default([])
+         | map('extract', hostvars, 'env_name')
+         | select('in', image_updater_policies | dict2items
+                        | selectattr('value.write_back', 'equalto', 'git')
+                        | map(attribute='key') | list)
+         | list }}
+
+- name: Read the Deploiment credentials already stored on this machine
+  ansible.builtin.shell: |
+    set -o pipefail
+    kubectl -n argocd get secret deploiment-git-creds -o json 2>/dev/null \
+      | jq -c '.data | {username: (.username | @base64d), password: (.password | @base64d)}' \
+      || echo '{}'
+  args:
+    executable: /bin/bash
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  register: deploiment_git_existing
+  changed_when: false
+  no_log: true
+  when: image_updater_git_envs | length > 0
+
+- name: Resolve the Deploiment credentials (variables, else this machine)
+  ansible.builtin.set_fact:
+    deploiment_git_resolved_user: "{{ deploiment_git_user if deploiment_git_token | length > 0 else (deploiment_git_existing.stdout | from_json).username | default('', true) }}"
+    deploiment_git_resolved_token: "{{ deploiment_git_token if deploiment_git_token | length > 0 else (deploiment_git_existing.stdout | from_json).password | default('', true) }}"
+  no_log: true
+  when: image_updater_git_envs | length > 0
+
+- name: Ask for the Deploiment git user
+  ansible.builtin.pause:
+    prompt: "[{{ org_id }}] Deploiment git user for image tag pull requests ({{ image_updater_git_envs | join(', ') }}; empty to skip)"
+  register: deploiment_git_user_prompt
+  when:
+    - image_updater_git_envs | length > 0
+    - secrets_prompt | bool
+    - deploiment_git_resolved_token | length == 0
+
+- name: Ask for the Deploiment git token
+  ansible.builtin.pause:
+    prompt: "[{{ org_id }}] Deploiment token (contents + pull requests read/write, hidden, empty to skip)"
+    echo: false
+  register: deploiment_git_token_prompt
+  when:
+    - image_updater_git_envs | length > 0
+    - secrets_prompt | bool
+    - deploiment_git_resolved_token | length == 0
+    - deploiment_git_user_prompt.user_input | default('') | length > 0
+  no_log: true
+
+- name: Keep the prompted Deploiment credentials
+  ansible.builtin.set_fact:
+    deploiment_git_resolved_user: "{{ deploiment_git_user_prompt.user_input }}"
+    deploiment_git_resolved_token: "{{ deploiment_git_token_prompt.user_input }}"
+  when: deploiment_git_token_prompt.user_input | default('') | length > 0
+  no_log: true
+
+- name: Write argocd/deploiment-git-creds
+  ansible.builtin.shell: |
+    set -o pipefail
+    kubectl -n argocd create secret generic deploiment-git-creds \
+      --from-literal=username="$GIT_USER" --from-literal=password="$GIT_TOKEN" \
+      --dry-run=client -o yaml | kubectl apply -f -
+  args:
+    executable: /bin/bash
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+    GIT_USER: "{{ deploiment_git_resolved_user }}"
+    GIT_TOKEN: "{{ deploiment_git_resolved_token }}"
+  register: deploiment_git_apply
+  changed_when: "'unchanged' not in deploiment_git_apply.stdout"
+  when:
+    - image_updater_git_envs | length > 0
+    - deploiment_git_resolved_token | length > 0
+  no_log: true
+
+- name: Warn when no Deploiment credentials are available
+  ansible.builtin.debug:
+    msg: >-
+      No Deploiment credentials (DEPLOIMENT_GIT_USER / DEPLOIMENT_GIT_TOKEN):
+      argocd-image-updater cannot open the image tag pull requests of
+      {{ image_updater_git_envs | join(', ') }}.
+  when:
+    - image_updater_git_envs | length > 0
+    - deploiment_git_resolved_token | length == 0
+
 # --- argocd-image-updater: one ImageUpdater per instance ----------------------
 # The CRD is installed by the argocd-image-updater Application that
 # platform-app has just started syncing: wait for it before applying.
@@ -263,6 +357,86 @@
   register: imageupdaters_apply
   changed_when: "'created' in imageupdaters_apply.stdout or 'configured' in imageupdaters_apply.stdout"
   when: groups[org_group ~ '_instances'] | default([]) | length > 0
+
+# --- Environments taken away from argocd-image-updater ------------------------
+# An ImageUpdater left from a former policy (prod's `default: semver` before
+# MAIR-415) would keep moving that environment: delete every ImageUpdater
+# that the template no longer renders.
+
+- name: List the ImageUpdaters on this machine
+  ansible.builtin.command: >
+    kubectl -n argocd get imageupdaters.argocd-image-updater.argoproj.io
+    -o jsonpath={.items[*].metadata.name}
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  register: imageupdaters_live
+  changed_when: false
+
+- name: Delete the ImageUpdaters of environments no longer followed
+  ansible.builtin.command: >
+    kubectl -n argocd delete imageupdaters.argocd-image-updater.argoproj.io {{ item }}
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  loop: >-
+    {{ imageupdaters_live.stdout.split()
+       | difference(groups[org_group ~ '_instances'] | default([])
+                    | map('extract', hostvars, 'env_name')
+                    | select('in', image_updater_policies.keys() | list) | list) }}
+  changed_when: true
+
+# Helm parameters written by a former `argocd` write-back still override
+# values.yaml on every Application whose environment no longer uses it.
+- name: List the image tags left in Application parameters
+  ansible.builtin.shell: |
+    set -o pipefail
+    kubectl -n argocd get applications.argoproj.io -o json | jq -c --argjson keep "$KEEP" '
+      [.items[]
+       | select(any(.metadata.ownerReferences[]?; .kind == "ApplicationSet" and .name == "instances"))
+       | select(.metadata.name as $n | $keep | index($n) | not)
+       | {name: .metadata.name, parameters: (.spec.source.helm.parameters // [])}
+       | select(.parameters | length > 0)]'
+  args:
+    executable: /bin/bash
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+    KEEP: >-
+      {{ image_updater_policies | dict2items
+         | selectattr('value.write_back', 'equalto', 'argocd')
+         | map(attribute='key') | list | to_json }}
+  register: leftover_parameters
+  changed_when: false
+
+- name: Report the image tags to pin in Deploiment
+  ansible.builtin.debug:
+    msg:
+      - "{{ item.name }} still runs on tags written outside git by argocd-image-updater; they override its values.yaml:"
+      - "{{ item.parameters | map(attribute='name') | zip(item.parameters | map(attribute='value')) | map('join', ' = ') | list }}"
+      - "{{ 'Removed (image_updater_clear_parameters): the next sync applies values.yaml.'
+            if image_updater_clear_parameters | bool else
+            'Pin them in clusters/' ~ org_id ~ '/instances/' ~ item.name ~ '/values.yaml (or the release manifest), then re-run with -e image_updater_clear_parameters=true.' }}"
+  loop: "{{ leftover_parameters.stdout | from_json }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Remove the leftover image parameters
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - -n
+      - argocd
+      - patch
+      - applications.argoproj.io
+      - "{{ item.name }}"
+      - --type=json
+      - -p
+      - '[{"op": "remove", "path": "/spec/source/helm/parameters"}]'
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  loop: "{{ leftover_parameters.stdout | from_json }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when: image_updater_clear_parameters | bool
+  changed_when: true
 
 # --- Output ------------------------------------------------------------------
 # The admin password is never read into a variable nor printed: it would land

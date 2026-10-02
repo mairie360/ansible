@@ -1,13 +1,60 @@
 ---
 # =============================================================================
-# Recette d'un déploiement. À lancer après site.yml.
+# Acceptance test of a deployment. Run it after site.yml.
 #
 #   ansible-playbook playbooks/verify.yml
 #
-# Échoue si une vérification échoue : utilisable en étape de CI.
+# Fails when any check fails: usable as a CI step.
 # =============================================================================
 
-- name: "Vérification des machines Argo CD"
+- name: "Preflight"
+  ansible.builtin.import_playbook: preflight.yml
+
+- name: "Every machine — SSH exposure and secrets encryption (MAIR-415)"
+  hosts: "*_argocd:*_instances"
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Read the firewall rules
+      ansible.builtin.command: ufw status
+      register: ufw_status
+      changed_when: false
+
+    # Any 22/tcp ALLOW rule not bound to wg0 is reachable from the Internet.
+    - name: Public SSH is closed (expected outside a bootstrap run)
+      ansible.builtin.assert:
+        that: >-
+          ssh_via_public_ip | bool or
+          ufw_status.stdout_lines | select('match', '^22/tcp( [(]v6[)])?\\s+ALLOW') | list | length == 0
+        fail_msg: >-
+          Port 22 is open publicly on {{ inventory_hostname }}:
+          {{ ufw_status.stdout_lines | select('match', '^22/tcp') | join(' | ') }}.
+          Re-run site.yml without -e ssh_via_public_ip=true.
+
+    - name: Read the sshd effective configuration
+      ansible.builtin.command: sshd -T
+      register: sshd_effective
+      changed_when: false
+
+    - name: sshd accepts public keys only, no root login
+      ansible.builtin.assert:
+        that:
+          - "'permitrootlogin no' in sshd_effective.stdout_lines"
+          - "'passwordauthentication no' in sshd_effective.stdout_lines"
+          - "'kbdinteractiveauthentication no' in sshd_effective.stdout_lines"
+        fail_msg: "sshd on {{ inventory_hostname }} is not hardened: re-run site.yml (role k8s_node)."
+
+    - name: Read the secrets encryption status
+      ansible.builtin.command: k3s secrets-encrypt status
+      register: encryption_status
+      changed_when: false
+
+    - name: Secrets are encrypted at rest
+      ansible.builtin.assert:
+        that: "'Encryption Status: Enabled' in encryption_status.stdout"
+        fail_msg: "{{ encryption_status.stdout_lines | join(' | ') }}"
+
+- name: "Argo CD machines"
   hosts: "*_argocd"
   become: true
   gather_facts: false
@@ -88,7 +135,7 @@
           enregistrée dans cet Argo CD. Relancer la phase 3.
       loop: "{{ groups[org_group ~ '_instances'] | default([]) }}"
 
-- name: "Vérification des instances"
+- name: "Instances"
   hosts: "*_instances"
   become: true
   gather_facts: false
@@ -96,6 +143,11 @@
     # The Deploiment checkout only lives on the Argo CD machine, which also
     # holds a kubeconfig for each instance (phase 3), with a context named
     # after the environment: run verify.sh from there.
+    - name: Refresh the instance kubeconfig on the Argo CD machine
+      ansible.builtin.include_role:
+        name: k8s_instance_link
+        tasks_from: kubeconfig
+
     - name: Full acceptance test of the instance (Deploiment/scripts/verify.sh)
       ansible.builtin.command:
         cmd: "./scripts/verify.sh {{ env_name }} {{ env_name }} {{ instance_domain }}"

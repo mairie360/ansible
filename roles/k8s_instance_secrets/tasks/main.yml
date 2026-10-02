@@ -32,6 +32,13 @@
     instance_ns: "mairie360-{{ env_name }}"
     instance_dir: "clusters/{{ org_id }}/instances/{{ env_name }}"
 
+# Short-lived token, refreshed on every run (MAIR-415): this playbook also
+# runs alone, long after phase 3 wrote the previous one.
+- name: Refresh the instance kubeconfig on the Argo CD machine
+  ansible.builtin.include_role:
+    name: k8s_instance_link
+    tasks_from: kubeconfig
+
 - name: Check that the local Deploiment checkout exists
   ansible.builtin.stat:
     path: "{{ deploiment_local_path }}/{{ instance_dir }}"

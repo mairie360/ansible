@@ -26,9 +26,30 @@ image_updater_services:
   - { alias: elearning-front, image: ghcr.io/mairie360/elearning-front,     path: Fronts.instances.elearning-front }
   - { alias: admin-front,     image: ghcr.io/mairie360/administrator-front, path: Fronts.instances.admin-front }
 
-# Tag policy per environment name. Any env not listed (a client's `prod`, for
-# instance) gets `default`: released semver tags only.
+# Environments followed by argocd-image-updater, by environment name
+# (MAIR-415). An environment NOT listed gets no ImageUpdater: its images are
+# exactly the tags pinned in its values.yaml in Deploiment, nothing else.
+# That is the case of prod and of every client instance: their versions only
+# change through a reviewed Deploiment commit promoted main -> staging ->
+# prod, so a Promote rollback also rolls the images back.
+#
+# write_back:
+#   argocd  the tag goes into the Application's Helm parameters, outside git
+#           (dev: every merge lands within minutes, nothing to review).
+#   git     argocd-image-updater opens a pull request on Deploiment's
+#           deploiment_repo_branch that bumps the tag in
+#           clusters/<org>/instances/<env>/values.yaml. Merged, then promoted
+#           to the environment's branch like any other change.
+#           Needs argocd/deploiment-git-creds (DEPLOIMENT_GIT_USER /
+#           DEPLOIMENT_GIT_TOKEN).
 image_updater_policies:
-  dev:     { strategy: newest-build, allow_tags: "regexp:^dev-.*" }
-  staging: { strategy: newest-build, allow_tags: "regexp:^staging-.*" }
-  default: { strategy: semver,       allow_tags: "regexp:^v?[0-9]+\\.[0-9]+\\.[0-9]+$" }
+  dev:     { strategy: newest-build, allow_tags: "regexp:^dev-.*",     write_back: argocd }
+  staging: { strategy: newest-build, allow_tags: "regexp:^staging-.*", write_back: git }
+
+# Instance Applications without an `argocd` write-back keep the Helm
+# parameters a former image-updater pass wrote there, and those override
+# values.yaml. The role lists them; with true it also removes them, so the
+# Application follows values.yaml again (prod and staging are synced by hand:
+# nothing changes on the cluster until the next sync). Pin the listed tags in
+# Deploiment first.
+image_updater_clear_parameters: false

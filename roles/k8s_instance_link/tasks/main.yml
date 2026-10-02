@@ -1,23 +1,23 @@
 ---
 # =============================================================================
-# PHASE 3 — Liaison
+# PHASE 3 — Link
 #
-# Enregistre l'instance auprès de l'Argo CD de SON groupe, une fois l'infra
-# Kubernetes en place des deux côtés.
+# Registers the instance with the Argo CD of ITS group, once Kubernetes is up
+# on both sides.
 #
-# Deux points qui ne sont pas des détails :
+# Two points that are not details:
 #
-# 1. Le cluster est enregistré sous le nom `env_name` (dev / staging / prod).
-#    C'est exactement ce que l'ApplicationSet attend dans destination.name.
-#    Un autre nom (l'inventory_hostname, par exemple) produit une Application
-#    bloquée en « cluster does not exist », sans autre symptôme.
+# 1. The cluster is registered under the name `env_name` (dev / staging /
+#    prod), exactly what the ApplicationSet expects in destination.name.
+#    Any other name (the inventory_hostname, for instance) leaves the
+#    Application stuck on "cluster does not exist", with no other symptom.
 #
-# 2. L'adresse enregistrée est l'IP WireGuard, jamais l'IP publique. Le port
-#    6443 donne un accès administrateur au cluster : il n'a rien à faire sur
-#    Internet.
+# 2. The registered address is the WireGuard IP, never the public IP. Port
+#    6443 gives administrator access to the cluster: it has no business on
+#    the Internet.
 # =============================================================================
 
-- name: Déterminer la machine Argo CD du groupe
+- name: Find the group's Argo CD machine
   ansible.builtin.set_fact:
     argocd_host: "{{ groups[org_group ~ '_argocd'][0] }}"
   tags: [labels]
@@ -68,42 +68,14 @@
       branch {{ deploiment_repo_branch }} of {{ deploiment_repo_url }}. Create
       and push it, then re-run site.yml (phase 2 refreshes the checkout).
 
-# --- Récupération du kubeconfig de l'instance ---------------------------------
+# --- Instance kubeconfig on the Argo CD machine ------------------------------
 
-- name: Lire le kubeconfig de l'instance
-  ansible.builtin.slurp:
-    src: /etc/rancher/k3s/k3s.yaml
-  register: instance_kubeconfig
-  # The k3s kubeconfig holds the cluster-admin client key.
-  no_log: true
+- name: Write a short-lived kubeconfig of the instance on the Argo CD machine
+  ansible.builtin.include_tasks: kubeconfig.yml
 
-- name: Préparer un kubeconfig pointant sur l'IP WireGuard
-  ansible.builtin.set_fact:
-    # k3s écrit 127.0.0.1 : inutilisable depuis la machine Argo CD. On réécrit
-    # vers l'IP du tunnel, et on nomme le contexte comme l'environnement.
-    instance_kubeconfig_rewritten: >-
-      {{ instance_kubeconfig.content | b64decode
-         | replace('127.0.0.1', wg_ip)
-         | replace('name: default', 'name: ' ~ env_name)
-         | replace('cluster: default', 'cluster: ' ~ env_name)
-         | replace('user: default', 'user: ' ~ env_name)
-         | replace('current-context: default', 'current-context: ' ~ env_name) }}
-  no_log: true
+# --- Registration -------------------------------------------------------------
 
-- name: Déposer le kubeconfig sur la machine Argo CD
-  ansible.builtin.copy:
-    content: "{{ instance_kubeconfig_rewritten }}"
-    dest: "/root/.kube/instance-{{ env_name }}.yaml"
-    owner: root
-    group: root
-    mode: "0600"
-  delegate_to: "{{ argocd_host }}"
-  diff: false
-  no_log: true
-
-# --- Enregistrement -----------------------------------------------------------
-
-- name: Vérifier la connectivité Argo CD -> instance par le tunnel
+- name: Check Argo CD -> instance connectivity through the tunnel
   ansible.builtin.command: "kubectl --kubeconfig /root/.kube/instance-{{ env_name }}.yaml get --raw /readyz"
   delegate_to: "{{ argocd_host }}"
   environment:
@@ -143,7 +115,7 @@
   delegate_to: "{{ argocd_host }}"
   changed_when: false
 
-- name: Enregistrer le cluster auprès de l'Argo CD du groupe
+- name: Register the cluster with the group's Argo CD
   ansible.builtin.command: >
     argocd cluster add {{ env_name }}
     --kubeconfig /root/.kube/instance-{{ env_name }}.yaml

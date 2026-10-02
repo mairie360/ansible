@@ -1,0 +1,36 @@
+---
+# =============================================================================
+# Preflight (MAIR-415). Imported first by site.yml, secrets.yml and
+# verify.yml: it fails with an explanation before Ansible times out on a
+# machine it has no route to.
+#
+# Targets the machines (so --limit applies) but never connects to them:
+# no fact gathering, and `assert` runs on the controller.
+#
+#   - every machine has its public IP in the vault (group_vars/all/vault.yml);
+#   - outside a bootstrap run, its group has at least one admin WireGuard
+#     peer: Ansible connects through the tunnel (ansible_host = wg_ip).
+# =============================================================================
+
+- name: "Preflight — inventory and SSH access"
+  hosts: "*_argocd:*_instances"
+  gather_facts: false
+  tasks:
+    - name: The machine has its public IP in the vault
+      ansible.builtin.assert:
+        that: (vault_public_ips | default({}))[inventory_hostname] is defined
+        fail_msg: >-
+          No public IP for {{ inventory_hostname }} in vault_public_ips. Add it
+          to inventory/group_vars/all/vault.yml (ansible-vault edit).
+        quiet: true
+
+    - name: The group has an admin WireGuard peer (normal runs)
+      ansible.builtin.assert:
+        that: wireguard_admin_peers | default([]) | length > 0
+        fail_msg: >-
+          Group {{ org_id }} has no wireguard_admin_peers: Ansible connects
+          through the tunnel and cannot reach {{ inventory_hostname }}. Add
+          your workstation to group_vars/{{ org_group }}.yml, then run site.yml
+          once with -e ssh_via_public_ip=true (README, "SSH access").
+        quiet: true
+      when: not (ssh_via_public_ip | bool)

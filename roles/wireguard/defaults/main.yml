@@ -1,4 +1,4 @@
-# Ferme le SSH public une fois le tunnel validé. Laisser à false tant que tu
-# n'as pas confirmé pouvoir te connecter par l'IP WireGuard : sinon tu te
-# verrouilles hors de la machine.
-wireguard_close_public_ssh: false
+# Admin workstations of the group's tunnel, set in group_vars/<org>.yml
+# (MAIR-415): [{name, public_key, wg_ip}]. Peers of the Argo CD machine, which
+# routes them to the instances, SSH only.
+wireguard_admin_peers: []

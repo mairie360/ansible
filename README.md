@@ -1,34 +1,36 @@
 # ansible
 
-Provisionnement des machines Mairie360. Ce dépôt **prépare les serveurs et
-amorce Kubernetes** ; l'état désiré des applications vit dans
+Provisioning of the Mairie360 machines. This repo **prepares the servers and
+bootstraps Kubernetes**; the desired state of the applications lives in
 [`mairie360/Deploiment`](https://github.com/mairie360/Deploiment).
 
-## Modèle
+## Model
 
-**Un Argo CD et une instance Mairie360 par machine.** Un *groupe* = un Argo CD
-+ ses instances.
+**One Argo CD and one Mairie360 instance per machine.** A *group* = one Argo
+CD + its instances.
 
 ```
-Groupe mairie360 (4 machines)      Groupe client-x (2 machines)
+Group mairie360 (4 machines)       Group client-x (2 machines)
   mairie360-argocd                   client-x-argocd
   mairie360-dev                      client-x-prod
   mairie360-staging
   mairie360-prod
 ```
 
-Chaque Argo CD ne pilote que les instances de son groupe, et son tunnel
-WireGuard ne porte que sur ce groupe. Un client compromis n'a aucune route
-réseau vers un autre : l'isolation vient de la topologie.
+Each Argo CD only drives the instances of its group, and its WireGuard tunnel
+only spans that group. A compromised client has no network route to another
+one: the isolation comes from the topology. The admin workstations are peers
+of that tunnel too, and Ansible reaches every machine through it (see "SSH
+access").
 
 ## The four phases
 
 | Phase | Role | Target | What it does |
 |---|---|---|---|
-| 1 | `k8s_node` | all | Hardening, firewall (6443 only from the group's Argo CD, over `wg0`), k3s (Traefik disabled, ServiceLB on), Cilium CNI + Hubble |
-| 1b | `wireguard` | all | Group tunnel: the Argo CD machine listens, the instances connect to it |
-| 2 | `k8s_argocd` | `*_argocd` | Argo CD + `platform-app.yaml` + the group's ApplicationSet, `argocd/ghcr-secret`, one `ImageUpdater` per instance |
-| 3 | `k8s_instance_link` | `*_instances` | `argocd cluster add` on the WireGuard IP + labels (`mairie360.fr/role`, `org`, `env`, `ingress`) |
+| 1 | `k8s_node` | all | Hardening (sshd public key only, no root), firewall (SSH only from the admin peers over `wg0`, 6443 only from the group's Argo CD over `wg0`), k3s (Secrets encrypted at rest, Traefik disabled, ServiceLB on), Cilium CNI + Hubble |
+| 1b | `wireguard` | all | Group tunnel: the Argo CD machine listens, the instances and the admin workstations connect to it; it routes the admins to the instances (SSH only) |
+| 2 | `k8s_argocd` | `*_argocd` | Argo CD + `platform-app.yaml` + the group's ApplicationSet, `argocd/ghcr-secret`, `argocd/deploiment-git-creds`, one `ImageUpdater` per followed environment (dev, staging; never prod) |
+| 3 | `k8s_instance_link` | `*_instances` | Short-lived instance kubeconfig on the Argo CD machine, `argocd cluster add` on the WireGuard IP + labels (`mairie360.fr/role`, `org`, `env`, `ingress`) |
 | 4 | `k8s_instance_secrets` | `*_instances` | Seals the instance secrets with `seal-secrets.sh`, asks for the missing external ones, copies `secrets.yaml` back to the local `Deploiment` checkout |
 
 The `k8s_argocd` role installs **neither** cert-manager, **nor** the ingress
@@ -44,7 +46,7 @@ with a pinned Traefik (`bootstrap/appsets/traefik-appset.yaml`,
 `docs/adr/0001-replace-ingress-nginx.md`). Only one controller can own ports
 80/443 of a machine (ServiceLB), so each instance machine says which one it
 runs with `ingress_controller` (`nginx` by default, set in
-`inventory/group_vars/all.yml`). Phase 3 writes it as the Argo CD cluster
+`inventory/group_vars/all/main.yml`). Phase 3 writes it as the Argo CD cluster
 label `mairie360.fr/ingress`: the Traefik AppSet takes `traefik`, the
 ingress-nginx AppSet everything else.
 
@@ -72,18 +74,24 @@ remove it), same command, and revert the values.
 Clone `Deploiment` next to this repo (`Devops/ansible` + `Devops/Deploiment`):
 phase 4 writes each instance's `secrets.yaml` there.
 
+Every command needs the vault password (the public IPs live in
+`inventory/group_vars/all/vault.yml`): `--ask-vault-pass`, or
+`ANSIBLE_VAULT_PASSWORD_FILE` pointing at a file only you can read. Your
+workstation's WireGuard tunnel must be up (see "SSH access").
+
 ```bash
 ansible-galaxy collection install -r requirements.yml
 
 # Deploy everything (asks for the secrets it cannot find)
-ansible-playbook playbooks/site.yml
+ansible-playbook playbooks/site.yml --ask-vault-pass
 
 # One group (adding a client, for instance). Always whole groups: the
 # WireGuard phase needs every machine of the group and fails otherwise.
-ansible-playbook playbooks/site.yml --limit 'client_example_argocd:client_example_instances'
+ansible-playbook playbooks/site.yml --ask-vault-pass --limit 'client_example_argocd:client_example_instances'
 
-# Acceptance test (runs Deploiment/scripts/verify.sh from the Argo CD machine)
-ansible-playbook playbooks/verify.yml
+# Acceptance test (runs Deploiment/scripts/verify.sh from the Argo CD machine,
+# and checks SSH exposure, sshd and Secrets encryption on every machine)
+ansible-playbook playbooks/verify.yml --ask-vault-pass
 ```
 
 Then commit and push the generated secrets, which Argo CD deploys from git:
@@ -192,17 +200,32 @@ delete `argocd-initial-admin-secret`. Run logs (`logs/`, `*.log`) are
 git-ignored. Before committing a role change, run the static check:
 
 ```bash
-python3 tests/check_no_log.py   # fails on a secret-handling task without no_log
+python3 tests/check_no_log.py     # fails on a secret-handling task without no_log
+python3 tests/check_inventory.py  # fails on a clear vault or a public IP in the repo
 ```
 
-## Ajouter un client
+## Adding a client
 
-Trois fichiers, aucun playbook ni rôle à toucher :
+No playbook or role to touch:
 
-1. `inventory/hosts.yml` — les groupes `client_x_argocd` et `client_x_instances`
-2. `inventory/group_vars/client_x_argocd.yml` et `inventory/group_vars/client_x_instances.yml` —
-   une ligne : `org_id: client-x`
-3. dans `Deploiment` : `clusters/client-x/instances/prod/values.yaml`
+1. `inventory/hosts.yml`: the parent group `client_x` with its children
+   `client_x_argocd` and `client_x_instances` (own WireGuard subnet, e.g.
+   `10.10.1.0/24`), following the commented template;
+2. `inventory/group_vars/client_x.yml`, from `client-example.yml.example`:
+   `org_id: client-x` and the admin peers of that group;
+3. the public IPs in the vault: `ansible-vault edit inventory/group_vars/all/vault.yml`;
+4. in `Deploiment`: `clusters/client-x/instances/prod/values.yaml`.
+
+The first run is a bootstrap run (no tunnel yet), then a normal one closes
+public SSH:
+
+```bash
+ansible-playbook playbooks/site.yml --ask-vault-pass --limit 'client_x_argocd:client_x_instances' -e ssh_via_public_ip=true
+ansible-playbook playbooks/site.yml --ask-vault-pass --limit 'client_x_argocd:client_x_instances'
+```
+
+A client `prod` gets no `ImageUpdater`: its versions only move through
+`Deploiment` (see "Image versions per environment").
 
 ## Network observability (Cilium / Hubble)
 
@@ -231,12 +254,12 @@ Migrating a machine provisioned with flannel: re-run `site.yml`. k3s restarts
 with flannel disabled, Cilium is installed, every pod is restarted once onto
 Cilium (a few minutes of downtime) and the flannel interfaces are removed.
 Do `dev` first. Pinned versions: `cilium_version`, `cilium_cli_version`,
-`hubble_cli_version` in `inventory/group_vars/all.yml` (see "Upgrading k3s and
+`hubble_cli_version` in `inventory/group_vars/all/main.yml` (see "Upgrading k3s and
 Argo CD" for `k3s_version` / `argocd_version`).
 
 ## Upgrading k3s and Argo CD
 
-Versions are pinned in `inventory/group_vars/all.yml` and bumped through a PR:
+Versions are pinned in `inventory/group_vars/all/main.yml` and bumped through a PR:
 
 | Variable | Pin | Why this one |
 |---|---|---|
@@ -275,36 +298,165 @@ default (`Endpoints`, `Lease`, `CiliumIdentity`, `CiliumEndpoint`; not
 `CiliumNetworkPolicy`). None of those is used by
 `Deploiment` today.
 
-## Conventions qui comptent
+## Conventions that matter
 
-**`org_id` garde les tirets** (`client-example`) parce qu'il doit correspondre
-au dossier `clusters/<org_id>/` de `Deploiment`. Les noms de groupes Ansible
-n'acceptent que des underscores. `org_group` (défini dans `inventory/group_vars/all.yml`)
-fait le pont — c'est lui qu'il faut utiliser dans `groups[...]`, jamais
-`org_id`.
+**`org_id` keeps its dashes** (`client-example`) because it must match the
+`clusters/<org_id>/` folder of `Deploiment`. Ansible group names only accept
+underscores. `org_group` (defined in `inventory/group_vars/all/main.yml`)
+bridges both: use it in `groups[...]`, never `org_id`.
 
-**`env_name` est le nom du cluster dans Argo CD.** L'ApplicationSet cible
-`destination.name: '{{ .path.basename }}'`, donc le nom du dossier
-`clusters/<org>/instances/<env>/`. Un enregistrement sous un autre nom (comme
-`inventory_hostname`) produit une Application bloquée en « cluster does not
-exist », sans autre symptôme. Le rôle `k8s_instance_link` force le bon nom.
+**`env_name` is the cluster name in Argo CD.** The ApplicationSet targets
+`destination.name: '{{ .path.basename }}'`, i.e. the name of the
+`clusters/<org>/instances/<env>/` folder. Registering under any other name
+(such as `inventory_hostname`) leaves the Application stuck on "cluster does
+not exist", with no other symptom. The `k8s_instance_link` role forces the
+right name.
 
-**Le label `mairie360.fr/role=instance`** distingue une instance de la machine
-Argo CD. Les AppSets du socle le sélectionnent : sans lui, aucun socle n'est
-déployé sur l'instance.
+**The `mairie360.fr/role=instance` label** tells an instance apart from the
+Argo CD machine. The base AppSets select on it: without it, nothing of the
+base layer is deployed on the instance.
 
-**`ansible_host` is for SSH, `wg_ip` is for Argo CD.** Port 6443 gives
-administrator access: it is only open on `wg0`, and only to the group's
+**`public_ip` is for the WireGuard endpoint, `wg_ip` for everything else.**
+Ansible SSH (`ansible_host`) and Argo CD both go through the tunnel. Port 6443
+gives administrator access: it is only open on `wg0`, and only to the group's
 Argo CD tunnel IP, never to the Internet.
 
-## Fermeture du SSH public
+## SSH access
 
-`k8s_node` laisse volontairement le port 22 ouvert : couper le SSH public avant
-d'avoir validé le tunnel verrouillerait la machine. Une fois la connexion par
-l'IP WireGuard confirmée :
+Since MAIR-415, no machine accepts SSH from the Internet. Ansible connects to
+`wg_ip` from a workstation that is a peer of the group's tunnel:
+
+- the workstations are listed in `wireguard_admin_peers`
+  (`inventory/group_vars/<org>.yml`): name, WireGuard public key, tunnel IP;
+- the Argo CD machine routes them to the instances, SSH only. UFW accepts SSH
+  on `wg0` from those IPs only: the machines of a group cannot SSH into each
+  other (a compromised dev reaches neither the Argo CD machine nor prod);
+- sshd only accepts public keys, never `root` (`/etc/ssh/sshd_config.d/00-mairie360.conf`);
+- host keys are checked (`ansible.cfg`): accepted on first contact, a changed
+  key fails the run. Over the tunnel the machine is already authenticated by
+  its WireGuard key;
+- the public IPs are in the ansible-vault file
+  `inventory/group_vars/all/vault.yml`, not in the inventory. They stay in the
+  git history before MAIR-415, and the instance ones are public anyway through
+  their DNS name: the gain is not publishing the Argo CD machine and no longer
+  pairing every address with its role.
+
+**Bootstrap run.** `-e ssh_via_public_ip=true` connects through the public
+IPs and keeps port 22 open publicly. It is the only way in for a new machine
+(no tunnel yet), or for a group whose admin peers changed in a way that cuts
+you off. The next normal run closes port 22 again. `playbooks/preflight.yml`
+refuses a normal run on a group without any admin peer.
+
+### Joining the tunnel from a workstation
 
 ```bash
-ansible-playbook playbooks/site.yml -e wireguard_close_public_ssh=true
+# 1. A key pair; the private key never leaves the workstation.
+umask 077; mkdir -p ~/.mairie360
+wg genkey | tee ~/.mairie360/wg-mairie360.key | wg pubkey
+# 2. Add yourself to inventory/group_vars/mairie360.yml (PR), with a free IP
+#    in 10.10.0.100-199:
+#      wireguard_admin_peers:
+#        - { name: <you>, public_key: "<output above>", wg_ip: "10.10.0.1xx" }
+# 3. Someone already in the tunnel applies it (phase 1 and 1b of site.yml).
 ```
 
-Le rôle vérifie que le tunnel répond avant de retirer la règle.
+Phase 1b prints the `[Peer]` block for the workstation. The configuration,
+e.g. `/etc/wireguard/mairie360.conf`, then `sudo wg-quick up mairie360`:
+
+```ini
+[Interface]
+PrivateKey = <content of ~/.mairie360/wg-mairie360.key>
+Address = 10.10.0.1xx/32
+
+[Peer]
+PublicKey = <printed by phase 1b: /etc/wireguard/public.key of the Argo CD machine>
+Endpoint = <public IP of mairie360-argocd, from the vault>:51820
+AllowedIPs = 10.10.0.0/24
+PersistentKeepalive = 25
+```
+
+`ssh ubuntu@10.10.0.11` must then reach dev. The Argo CD UI is reached the
+same way: `ssh -L 8080:localhost:8080 ubuntu@10.10.0.1`, then
+`sudo kubectl -n argocd port-forward svc/argocd-server 8080:443`.
+
+### Migrating machines provisioned before MAIR-415
+
+In this order, whole groups, from a workstation that still has public SSH:
+
+```bash
+# 1. Encrypt the vault (team vault password) and add your admin peer (above).
+ansible-vault encrypt inventory/group_vars/all/vault.yml
+# 2. Bootstrap run: admin peers and routing, sshd, Secrets encryption.
+#    Port 22 stays public.
+ansible-playbook playbooks/site.yml --ask-vault-pass -e ssh_via_public_ip=true
+# 3. Bring your tunnel up and check every machine answers through it.
+sudo wg-quick up mairie360
+for ip in 10.10.0.1 10.10.0.11 10.10.0.12 10.10.0.13; do ssh -o BatchMode=yes ubuntu@$ip true && echo "$ip ok"; done
+# 4. Normal run: through the tunnel, closes port 22 publicly.
+ansible-playbook playbooks/site.yml --ask-vault-pass
+ansible-playbook playbooks/verify.yml --ask-vault-pass
+```
+
+## Secrets encryption at rest
+
+k3s runs with `secrets-encryption: true` (`k8s_node`): Secrets are stored
+encrypted in the k3s datastore (key in `/var/lib/rancher/k3s/server/cred/`,
+backed up with the machine, never in git). A new machine is encrypted from its
+first start. A machine started without it goes through the k3s migration on
+the next `site.yml` run: `k3s secrets-encrypt enable`, a k3s restart with the
+flag, `rotate-keys` (re-encrypts every existing Secret, about 5 per second),
+another restart. Two short API server interruptions per machine; the pods keep
+running. Do `dev` first:
+
+```bash
+ansible-playbook playbooks/site.yml --ask-vault-pass --limit 'mairie360_argocd:mairie360_instances'
+sudo k3s secrets-encrypt status   # on a machine: "Encryption Status: Enabled"
+```
+
+## Image versions per environment
+
+| Environment | Who moves the image tags | Where they live |
+|---|---|---|
+| `dev` | argocd-image-updater, newest `dev-<sha>` | Application parameters (outside git) |
+| `staging` | argocd-image-updater, newest `staging-<sha>`, as a **pull request** on `Deploiment` `main` | `clusters/<org>/instances/staging/values.yaml`, deployed once merged and promoted to `staging` |
+| `prod`, client instances | nobody: no `ImageUpdater` | `clusters/<org>/instances/<env>/values.yaml`, promoted `main` -> `staging` -> `prod` like any change |
+
+The policies are `image_updater_policies` (`roles/k8s_argocd/defaults/main.yml`):
+an environment that is not listed is never touched by argocd-image-updater.
+Prod therefore runs the exact combination of tags committed in `Deploiment`,
+reviewed and promoted through staging, and a `Promote` rollback also rolls the
+images back.
+
+The staging pull requests need `argocd/deploiment-git-creds`: a fine-grained
+token on `mairie360/Deploiment` with contents and pull requests read/write,
+from `DEPLOIMENT_GIT_USER` / `DEPLOIMENT_GIT_TOKEN`, else kept from the
+machine, else prompted (phase 2).
+
+**Migrating an Argo CD provisioned before MAIR-415.** The tags a former
+`argocd` write-back stored in the prod and staging Applications still override
+their `values.yaml`. Phase 2 deletes the prod `ImageUpdater` and prints, per
+Application, the tags it still carries. Pin those in `Deploiment` (PR, then
+promote), then remove them:
+
+```bash
+ansible-playbook playbooks/site.yml --ask-vault-pass --limit 'mairie360_argocd:mairie360_instances' -e image_updater_clear_parameters=true
+```
+
+prod and staging are synced by hand: nothing changes on the cluster until the
+next sync, which then applies `values.yaml`. Check the Argo CD diff shows no
+image change before syncing.
+
+## Instance kubeconfigs on the Argo CD machine
+
+`/root/.kube/instance-<env>.yaml` (used by `argocd cluster add`, phase 4 and
+`verify.yml`) holds a token of the `kube-system/mairie360-ops` ServiceAccount
+that expires after `instance_ops_token_duration` (2 h), rewritten by every
+playbook that needs it. It used to be the k3s admin client certificate: valid
+for a year and impossible to revoke. To also invalidate the certificates
+copied before MAIR-415, rotate the k3s client certificates on each instance
+(`k3s certificate rotate` with k3s stopped, `dev` first).
+
+Argo CD itself uses the `kube-system/argocd-manager` ServiceAccount that
+`argocd cluster add` creates on each instance. The Argo CD machine still holds
+those tokens for dev, staging and prod: a separate Argo CD group for prod is
+the next step to break that concentration.
