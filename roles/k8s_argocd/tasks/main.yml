@@ -12,9 +12,12 @@
 # what used to go wrong.
 # =============================================================================
 
+# argon2: Deploiment's scripts/seal-secrets.sh, run on this machine, seals
+# the admin account's password as an argon2id hash (MAIR-414) and falls back
+# on the argon2 CLI when OpenSSL is older than 3.2 (Ubuntu 24.04 ships 3.0).
 - name: Installer les dépendances du rôle
   ansible.builtin.apt:
-    name: [git, curl]
+    name: [git, curl, argon2]
     state: present
     update_cache: true
     cache_valid_time: 3600
