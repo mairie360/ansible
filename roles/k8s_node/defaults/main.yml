@@ -6,3 +6,8 @@ node_public_ports: []
 # safety net for a 4 GB machine; it needs that much free space on the root disk.
 node_swap_size_mb: 2048
 node_swap_file: /swapfile
+
+# Retention of the machine's logs (journald MaxRetentionSec, MAIR-293): the
+# technical_logs period of Devops/Deploiment compliance/<org>/retention.yaml,
+# 1 year at most. Override per group when the mairie decides a shorter one.
+technical_logs_retention: "1year"
