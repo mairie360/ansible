@@ -1,0 +1,61 @@
+{#- GDPR gaps of one machine (MAIR-293), rendered by playbooks/verify.yml as a YAML list of
+    {id, message}. Inputs: state (pairs key=value collected on the machine), access and retention
+    (Deploiment compliance/<org_id>/ decisions, None when missing), group_wg_keys (group hosts). -#}
+{%- set ns = namespace(gaps=[]) -%}
+{%- set s = {} -%}
+{%- set keys = namespace(ssh=[], wg=[]) -%}
+{%- for pair in state if pair | length == 2 -%}
+{%-   if pair[0] == 'ssh_key' -%}{%- set keys.ssh = keys.ssh + [pair[1]] -%}
+{%-   elif pair[0] == 'wg_peer' -%}{%- set keys.wg = keys.wg + [pair[1]] -%}
+{%-   else -%}{%- set _ = s.update({pair[0]: pair[1]}) -%}{%- endif -%}
+{%- endfor -%}
+{#- Seconds of "1 year", "6 months", "30 days" (decision files) or "1year", "365d", "31536000"
+    (journald). -#}
+{%- macro seconds(text) -%}
+{%-   set m = (text | default('') | string | trim | regex_search('^(\\d+)\\s*([a-zA-Z]*)$', '\\1', '\\2')) -%}
+{%-   if not m -%}-1{%- else -%}
+{%-     set n = m[0] | int -%}{%- set u = m[1] | lower -%}
+{%-     if u in ['', 's', 'sec', 'second', 'seconds'] -%}{{ n }}
+{%-     elif u in ['min', 'm', 'minute', 'minutes'] -%}{{ n * 60 }}
+{%-     elif u in ['h', 'hour', 'hours'] -%}{{ n * 3600 }}
+{%-     elif u in ['d', 'day', 'days'] -%}{{ n * 86400 }}
+{%-     elif u in ['w', 'week', 'weeks'] -%}{{ n * 604800 }}
+{%-     elif u in ['month', 'months'] -%}{{ n * 2629800 }}
+{%-     elif u in ['y', 'year', 'years'] -%}{{ n * 31557600 }}
+{%-     else -%}-1{%- endif -%}
+{%-   endif -%}
+{%- endmacro -%}
+{%- if s.get('auditd') != 'active' -%}{%- set ns.gaps = ns.gaps + [{'id': 'auditd', 'message': 'auditd is not active'}] -%}{%- endif -%}
+{%- if s.get('passwordauthentication') != 'no' -%}{%- set ns.gaps = ns.gaps + [{'id': 'sshd-password', 'message': 'sshd accepts passwords (passwordauthentication ' ~ s.get('passwordauthentication', 'unknown') ~ ')'}] -%}{%- endif -%}
+{%- if s.get('permitrootlogin') != 'no' -%}{%- set ns.gaps = ns.gaps + [{'id': 'sshd-root', 'message': 'sshd lets root log in (permitrootlogin ' ~ s.get('permitrootlogin', 'unknown') ~ ')'}] -%}{%- endif -%}
+{%- if s.get('public_ssh') != 'closed' -%}{%- set ns.gaps = ns.gaps + [{'id': 'public-ssh', 'message': 'port 22 is open outside the WireGuard tunnel (wireguard_close_public_ssh)'}] -%}{%- endif -%}
+{%- if s.get('secrets_encryption', '') | lower != 'enabled' -%}{%- set ns.gaps = ns.gaps + [{'id': 'k3s-secrets-encryption', 'message': 'k3s secrets encryption is not enabled (k3s secrets-encrypt status)'}] -%}{%- endif -%}
+{%- if s.get('unattended_upgrades') != '1' -%}{%- set ns.gaps = ns.gaps + [{'id': 'automatic-updates', 'message': 'unattended-upgrades is not enabled (APT::Periodic::Unattended-Upgrade)'}] -%}{%- endif -%}
+{%- if hosted_at_mairie | default(false) | bool and s.get('disk_encrypted') != 'yes' -%}{%- set ns.gaps = ns.gaps + [{'id': 'disk-encryption', 'message': 'the machine is hosted at the mairie and has no encrypted (crypt) volume'}] -%}{%- endif -%}
+{%- if retention is none or retention.technical_logs is not defined -%}
+{%-   set ns.gaps = ns.gaps + [{'id': 'technical-logs', 'message': 'no technical_logs decision in compliance/' ~ org_id ~ '/retention.yaml'}] -%}
+{%- else -%}
+{%-   set decided = seconds(retention.technical_logs.period | replace(' ', '')) | int -%}
+{%-   set applied = seconds(s.get('journald_retention', '')) | int -%}
+{%-   if applied <= 0 or decided <= 0 or applied > decided -%}
+{%-     set ns.gaps = ns.gaps + [{'id': 'technical-logs', 'message': 'journald MaxRetentionSec is ' ~ (s.get('journald_retention') or 'unset') ~ ', the decided technical logs period is ' ~ retention.technical_logs.period}] -%}
+{%-   endif -%}
+{%- endif -%}
+{%- if access is none or not (access.people | default([])) -%}
+{%-   set ns.gaps = ns.gaps + [{'id': 'access-decision', 'message': 'no decision: compliance/' ~ org_id ~ '/access.yaml lists nobody, the SSH keys, WireGuard peers and Argo CD accounts cannot be checked'}] -%}
+{%- else -%}
+{%-   set people = access.people -%}
+{%-   set allowed_ssh = people | selectattr('ssh_key_fingerprint', 'defined') | map(attribute='ssh_key_fingerprint') | list -%}
+{%-   set extra_ssh = keys.ssh | reject('in', allowed_ssh) | list -%}
+{%-   if extra_ssh -%}{%- set ns.gaps = ns.gaps + [{'id': 'ssh-keys', 'message': 'authorized SSH keys not in access.yaml: ' ~ (extra_ssh | join(', '))}] -%}{%- endif -%}
+{%-   set host_wg = group_wg_keys | map('extract', hostvars) | selectattr('wg_self_key', 'defined') | map(attribute='wg_self_key') | selectattr('rc', 'equalto', 0) | map(attribute='stdout') | map('trim') | list -%}
+{%-   set allowed_wg = host_wg + (people | selectattr('wireguard_public_key', 'defined') | map(attribute='wireguard_public_key') | list) -%}
+{%-   set extra_wg = keys.wg | reject('in', allowed_wg) | list -%}
+{%-   if extra_wg -%}{%- set ns.gaps = ns.gaps + [{'id': 'wireguard-peers', 'message': 'WireGuard peers that are neither a machine of the group nor in access.yaml: ' ~ (extra_wg | length)}] -%}{%- endif -%}
+{%-   if argocd_accounts is defined and argocd_accounts.stdout_lines is defined -%}
+{%-     set allowed_accounts = people | selectattr('argocd_account', 'defined') | map(attribute='argocd_account') | list -%}
+{%-     set extra_accounts = argocd_accounts.stdout_lines | reject('in', allowed_accounts) | list -%}
+{%-     if extra_accounts -%}{%- set ns.gaps = ns.gaps + [{'id': 'argocd-accounts', 'message': 'Argo CD accounts not in access.yaml: ' ~ (extra_accounts | join(', '))}] -%}{%- endif -%}
+{%-   endif -%}
+{%- endif -%}
+{{ ns.gaps | to_yaml }}

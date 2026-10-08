@@ -192,8 +192,24 @@ delete `argocd-initial-admin-secret`. Run logs (`logs/`, `*.log`) are
 git-ignored. Before committing a role change, run the static check:
 
 ```bash
-python3 tests/check_no_log.py   # fails on a secret-handling task without no_log
+python3 tests/check_no_log.py       # fails on a secret-handling task without no_log
+python3 tests/check_gdpr_config.py  # fails when Hubble metrics are labelled with IP addresses
+ansible-playbook tests/gdpr_gaps_test.yml   # the GDPR gaps of verify.yml, on localhost
 ```
+
+## GDPR checks of the machines (MAIR-293)
+
+`playbooks/verify.yml` ends with a read-only GDPR play on every machine (Argo CD and instances).
+It collects auditd, the effective sshd settings (`sshd -T`: no password, no root), the UFW rule of
+port 22 (open only on `wg0`), `k3s secrets-encrypt status`, unattended-upgrades, an encrypted
+(`crypt`) volume on the machines marked `hosted_at_mairie: true`, journald's `MaxRetentionSec`
+against the `technical_logs` period of Devops/Deploiment `compliance/<org_id>/retention.yaml`, and
+the authorized SSH keys, WireGuard peers and Argo CD accounts against `compliance/<org_id>/access.yaml`
+(read from the Deploiment checkout of the Argo CD machine; an empty `access.yaml` is reported as
+"no decision"). Each failed check is a gap (`playbooks/templates/gdpr_gaps.j2`); the play fails on any
+gap not listed in `gdpr_allowed_gaps` (group_vars, `id: reason`). The role `k8s_node` installs auditd
+and bounds journald to `technical_logs_retention` (1 year by default), and the Hubble metrics no
+longer carry IP addresses.
 
 ## Ajouter un client
 
