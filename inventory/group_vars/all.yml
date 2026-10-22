@@ -87,3 +87,11 @@ ghcr_token: "{{ lookup('ansible.builtin.env', 'GHCR_TOKEN') }}"
 # the cluster. Set to false in CI (-e secrets_prompt=false): missing secrets
 # are then only reported.
 secrets_prompt: true
+
+# GDPR checks of playbooks/verify.yml (MAIR-293): gaps accepted for now, each
+# with its reason (id: reason). An empty map makes every gap fail the play.
+# Ids: auditd, sshd-password, sshd-root, public-ssh, k3s-secrets-encryption,
+# automatic-updates, disk-encryption, technical-logs, access-decision,
+# ssh-keys, wireguard-peers, argocd-accounts. Machines hosted at the mairie set
+# `hosted_at_mairie: true` in the inventory (their disk must be encrypted).
+gdpr_allowed_gaps: {}

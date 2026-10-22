@@ -1,0 +1,75 @@
+---
+# Test of playbooks/templates/gdpr_gaps.j2 (MAIR-293), on localhost, no machine touched:
+#
+#   ansible-playbook tests/gdpr_gaps_test.yml
+#
+# Renders the gaps for a compliant machine and for a non-compliant one, and checks the ids.
+- name: GDPR gaps of verify.yml
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    org_id: mairie360
+    group_wg_keys: []
+    compliant_state:
+      - [auditd, active]
+      - [passwordauthentication, "no"]
+      - [permitrootlogin, "no"]
+      - [public_ssh, closed]
+      - [secrets_encryption, Enabled]
+      - [unattended_upgrades, "1"]
+      - [disk_encrypted, "yes"]
+      - [journald_retention, 6month]
+      - [ssh_key, "SHA256:allowed"]
+      - [wg_peer, "allowedpeer="]
+    leaky_state:
+      - [auditd, inactive]
+      - [passwordauthentication, "yes"]
+      - [permitrootlogin, prohibit-password]
+      - [public_ssh, open]
+      - [secrets_encryption, Disabled]
+      - [unattended_upgrades, "0"]
+      - [disk_encrypted, "no"]
+      - [journald_retention, ""]
+      - [ssh_key, "SHA256:stranger"]
+      - [wg_peer, "strangerpeer="]
+    decided_retention: {technical_logs: {period: "1 year"}}
+    decided_access:
+      people:
+        - {name: Jane, ssh_key_fingerprint: "SHA256:allowed", wireguard_public_key: "allowedpeer=", argocd_account: jane}
+  tasks:
+    - name: Compliant machine
+      ansible.builtin.set_fact:
+        compliant: "{{ lookup('ansible.builtin.template', '../playbooks/templates/gdpr_gaps.j2') | from_yaml }}"
+      vars:
+        state: "{{ compliant_state }}"
+        access: "{{ decided_access }}"
+        retention: "{{ decided_retention }}"
+        hosted_at_mairie: true
+        argocd_accounts: {stdout_lines: [jane]}
+
+    - name: Non-compliant machine
+      ansible.builtin.set_fact:
+        leaky: "{{ lookup('ansible.builtin.template', '../playbooks/templates/gdpr_gaps.j2') | from_yaml }}"
+      vars:
+        state: "{{ leaky_state }}"
+        access: "{{ decided_access }}"
+        retention: "{{ decided_retention }}"
+        hosted_at_mairie: true
+        argocd_accounts: {stdout_lines: [jane, admin]}
+
+    - name: Machine without an access decision
+      ansible.builtin.set_fact:
+        undecided: "{{ lookup('ansible.builtin.template', '../playbooks/templates/gdpr_gaps.j2') | from_yaml }}"
+      vars:
+        state: "{{ compliant_state }}"
+        access: {version: 1, people: []}
+        retention: "{{ decided_retention }}"
+
+    - name: The gaps are the expected ones
+      ansible.builtin.assert:
+        that:
+          - compliant == []
+          - leaky | map(attribute='id') | list == ['auditd', 'sshd-password', 'sshd-root', 'public-ssh', 'k3s-secrets-encryption', 'automatic-updates', 'disk-encryption', 'technical-logs', 'ssh-keys', 'wireguard-peers', 'argocd-accounts']
+          - undecided | map(attribute='id') | list == ['access-decision']
+        fail_msg: "compliant={{ compliant }} leaky={{ leaky | map(attribute='id') | list }} undecided={{ undecided | map(attribute='id') | list }}"

@@ -8,10 +8,45 @@
 
 - name: Installer les dépendances système
   ansible.builtin.apt:
-    name: [curl, jq, ufw, fail2ban, chrony, unattended-upgrades, python3-yaml]
+    # auditd: audit trail of the machine (MAIR-293, checked by playbooks/verify.yml).
+    name: [curl, jq, ufw, fail2ban, chrony, unattended-upgrades, python3-yaml, auditd]
     state: present
     update_cache: true
     cache_valid_time: 3600
+
+- name: Enable auditd
+  ansible.builtin.systemd:
+    name: auditd
+    enabled: true
+    state: started
+
+# --- Technical logs (MAIR-293, MAIR-294) --------------------------------------
+# journald keeps the machine's logs (k3s included) until its size limit only:
+# bound them in time too, to the period decided in Devops/Deploiment
+# compliance/<org>/retention.yaml (technical_logs, 1 year at most, the mairie
+# may shorten it). playbooks/verify.yml compares both.
+
+- name: Create the journald drop-in directory
+  ansible.builtin.file:
+    path: /etc/systemd/journald.conf.d
+    state: directory
+    mode: "0755"
+
+- name: Bound the retention of the machine's logs
+  ansible.builtin.copy:
+    dest: /etc/systemd/journald.conf.d/50-retention.conf
+    mode: "0644"
+    content: |
+      # Managed by Ansible (role k8s_node, MAIR-293): technical logs retention.
+      [Journal]
+      MaxRetentionSec={{ technical_logs_retention }}
+  register: journald_retention
+
+- name: Apply the journald retention
+  ansible.builtin.systemd:
+    name: systemd-journald
+    state: restarted
+  when: journald_retention.changed
 
 # --- Swap --------------------------------------------------------------------
 # A small swap file is a safety net, not extra capacity: when memory runs out
