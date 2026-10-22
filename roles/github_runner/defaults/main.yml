@@ -1,0 +1,52 @@
+# Role github_runner (MAIR-346). The switches that matter live in
+# inventory/group_vars/all.yml: github_runner_enabled, github_runner_verify_envs,
+# github_runner_version, github_runner_sha256.
+
+# Repository the runner registers on, at the REPOSITORY level (not the org):
+# "owner/name", derived from deploiment_repo_url.
+github_runner_repo: "{{ deploiment_repo_url | regex_replace('^https://github\\.com/', '') | regex_replace('\\.git$', '') }}"
+
+# Labels of the runner. A Deploiment job targets this group's runner with
+# `runs-on: [self-hosted, linux, mairie360-argocd-<org_id>]`; the last label
+# is unique per group, so a job can never land on another group's runner.
+github_runner_labels:
+  - self-hosted
+  - linux
+  - "mairie360-argocd-{{ org_id }}"
+
+# Dedicated, non-root system user running the runner and every job.
+github_runner_user: gh-runner
+
+# GitHub App used to register the runner. Each job gets a fresh
+# just-in-time (JIT, ephemeral) registration, so the credential must stay on
+# the machine: it lives in /etc/gh-runner (root, 0700), read only by the
+# root pre-start step of the service, never by the runner or its jobs.
+# Resolved in this order: these variables (from GITHUB_RUNNER_APP_ID /
+# GITHUB_RUNNER_APP_PRIVATE_KEY_FILE on the controller, or -e), the
+# credential already on the machine, then a prompt (secrets_prompt).
+# The App needs the repository permission "Administration: Read and write"
+# on the Deploiment repository only (runner registration), nothing else.
+github_runner_app_id: "{{ lookup('ansible.builtin.env', 'GITHUB_RUNNER_APP_ID') }}"
+# Path, on the controller, of the App's private key (.pem). Never committed.
+github_runner_app_private_key_file: "{{ lookup('ansible.builtin.env', 'GITHUB_RUNNER_APP_PRIVATE_KEY_FILE') }}"
+
+# Namespace, on each verified instance, holding the runner's ServiceAccount
+# (verify-runner) and its token Secret. Kept out of mairie360-<env>, which
+# Argo CD manages.
+github_runner_sa_namespace: mairie360-ci
+github_runner_sa_name: verify-runner
+
+# Probe pods of scripts/verify.sh (Deploiment, function probe()): the
+# ServiceAccount may only create, attach to and delete pods named
+# `<prefix>*` running exactly this image, with no volume, env or token
+# (ValidatingAdmissionPolicy in templates/verify-rbac.yaml.j2). Keep in sync
+# with verify.sh: another image there makes the promotion gate fail loudly
+# until it is changed here.
+github_runner_probe_prefix: verify-probe-
+github_runner_probe_image: curlimages/curl:8.10.1
+# Probe names (after the prefix) whose logs the ServiceAccount may read:
+# `kubectl run -i` reads the logs of a probe that ended before it attached.
+# pods/log is a read, not an admission request, so the prefix rule above
+# cannot cover it: names are listed so that the logs of the application
+# pods stay out of reach. A new probe in verify.sh must be added here.
+github_runner_probe_names: [redis, deny, allow, keycloak]

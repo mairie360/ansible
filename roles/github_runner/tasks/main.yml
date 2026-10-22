@@ -1,0 +1,288 @@
+---
+# =============================================================================
+# PHASE 5 — Promotion runner (MAIR-346), on the group's Argo CD machine only,
+# for groups with github_runner_enabled.
+#
+# Deploiment's "Promote" workflow must run scripts/verify.sh against staging
+# before it moves `prod`, but GitHub-hosted runners have no route to the
+# instance API servers (6443 is only open on the WireGuard tunnel, to this
+# machine). This role runs a self-hosted runner HERE, where the tunnel
+# already is, without opening anything:
+#   - outbound only: the runner polls GitHub over HTTPS, no inbound port, no
+#     firewall or WireGuard change;
+#   - ephemeral: one just-in-time registration per job, pristine runner
+#     directory and HOME each time;
+#   - dedicated non-root user, sandboxed systemd unit whose network cannot
+#     reach the tunnel except the verified instances;
+#   - on each verified instance, a ServiceAccount limited to what verify.sh
+#     does, never the admin kubeconfig of /root/.kube/.
+# =============================================================================
+
+# host, env_name and wg_ip of each instance of the group listed in
+# github_runner_verify_envs.
+- name: Resolve the instances the runner verifies
+  ansible.builtin.set_fact:
+    github_runner_targets: >-
+      {%- set targets = [] -%}
+      {%- for h in groups[org_group ~ '_instances'] | default([]) -%}
+      {%- if hostvars[h].env_name | default('') in github_runner_verify_envs -%}
+      {%- set _ = targets.append({'host': h, 'env_name': hostvars[h].env_name, 'wg_ip': hostvars[h].wg_ip}) -%}
+      {%- endif -%}
+      {%- endfor -%}
+      {{ targets }}
+
+- name: Every environment of github_runner_verify_envs is an instance of the group
+  ansible.builtin.assert:
+    that:
+      - github_runner_verify_envs | difference(github_runner_targets | map(attribute='env_name')) | length == 0
+    fail_msg: >-
+      github_runner_verify_envs lists {{ github_runner_verify_envs | join(', ') }},
+      but the group {{ org_id }} only has
+      {{ groups[org_group ~ '_instances'] | default([]) | map('extract', hostvars, 'env_name') | join(', ') }}.
+
+- name: WireGuard IPs the runner may reach
+  ansible.builtin.set_fact:
+    github_runner_allowed_ips: "{{ github_runner_targets | map(attribute='wg_ip') | list }}"
+
+# The runner's own needs (tar, curl, jq, openssl for prepare.sh) and those of
+# Deploiment's scripts/verify.sh: bash, kubectl (k3s), curl, openssl, getent
+# (libc-bin), timeout / base64 / od (coreutils), awk, plus git for checkout.
+- name: Install the runner dependencies
+  ansible.builtin.apt:
+    name: [bash, coreutils, curl, gawk, git, jq, libc-bin, openssl, tar]
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Check that kubectl is available (k3s)
+  ansible.builtin.command: kubectl version --client
+  changed_when: false
+
+# No login shell and a home the user cannot write to: the runner's writable
+# state lives under /var/lib/gh-runner and is wiped before every job.
+- name: Create the runner system user
+  ansible.builtin.user:
+    name: "{{ github_runner_user }}"
+    system: true
+    shell: /usr/sbin/nologin
+    home: "/home/{{ github_runner_user }}"
+    create_home: false
+
+- name: Create the runner directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: root
+    group: "{{ item.group }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - { path: "/home/{{ github_runner_user }}", group: "{{ github_runner_user }}", mode: "0750" }
+    - { path: "/home/{{ github_runner_user }}/.kube", group: "{{ github_runner_user }}", mode: "0750" }
+    - { path: /etc/gh-runner, group: root, mode: "0700" }
+    - { path: /opt/gh-runner, group: root, mode: "0755" }
+    - { path: /usr/local/lib/gh-runner, group: root, mode: "0755" }
+    - { path: /var/lib/gh-runner, group: root, mode: "0755" }
+  loop_control:
+    label: "{{ item.path }}"
+
+# --- Pinned runner release -----------------------------------------------------
+
+- name: Download the pinned runner release (sha256 verified)
+  ansible.builtin.get_url:
+    url: "https://github.com/actions/runner/releases/download/v{{ github_runner_version }}/actions-runner-linux-x64-{{ github_runner_version }}.tar.gz"
+    dest: "/opt/gh-runner/actions-runner-linux-x64-{{ github_runner_version }}.tar.gz"
+    checksum: "sha256:{{ github_runner_sha256 }}"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Create the pristine runner directory of this version
+  ansible.builtin.file:
+    path: "/opt/gh-runner/dist-{{ github_runner_version }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+# Root-owned and never written by the runner: prepare.sh copies it into
+# /var/lib/gh-runner/runner before every job.
+- name: Unpack the runner release
+  ansible.builtin.unarchive:
+    src: "/opt/gh-runner/actions-runner-linux-x64-{{ github_runner_version }}.tar.gz"
+    dest: "/opt/gh-runner/dist-{{ github_runner_version }}"
+    remote_src: true
+    owner: root
+    group: root
+    creates: "/opt/gh-runner/dist-{{ github_runner_version }}/run.sh"
+  register: github_runner_unpacked
+  notify: Restart gh-runner
+
+# Not a handler: the dependencies must be there before the service starts.
+- name: Install the runner's system dependencies (libicu, ...)  # noqa: no-handler
+  ansible.builtin.command: ./bin/installdependencies.sh
+  args:
+    chdir: "/opt/gh-runner/dist-{{ github_runner_version }}"
+  when: github_runner_unpacked is changed
+  changed_when: true
+
+- name: Find the releases left by a previous pin
+  ansible.builtin.find:
+    paths: /opt/gh-runner
+    patterns: ["dist-*", "actions-runner-linux-x64-*.tar.gz"]
+    file_type: any
+    excludes:
+      - "dist-{{ github_runner_version }}"
+      - "actions-runner-linux-x64-{{ github_runner_version }}.tar.gz"
+  register: github_runner_old_releases
+
+- name: Remove the releases left by a previous pin
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: absent
+  loop: "{{ github_runner_old_releases.files }}"
+  loop_control:
+    label: "{{ item.path }}"
+
+# --- Least-privilege access to the verified instances ----------------------------
+
+- name: Give the runner access to each verified instance
+  ansible.builtin.include_tasks: verify_access.yml
+  loop: "{{ github_runner_targets }}"
+  loop_control:
+    loop_var: github_runner_target
+    label: "{{ github_runner_target.env_name }}"
+
+# --- GitHub App credential ------------------------------------------------------
+
+- name: Check whether the App credential is already on this machine
+  ansible.builtin.stat:
+    path: /etc/gh-runner/app.pem
+  register: github_runner_app_key_stat
+
+- name: Ask for the GitHub App ID
+  ansible.builtin.pause:
+    prompt: >-
+      [{{ org_id }}] GitHub App ID registering the runner on {{ github_runner_repo }}
+      (repository permission Administration: read and write; empty to skip)
+  register: github_runner_app_id_prompt
+  when:
+    - secrets_prompt | bool
+    - github_runner_app_id | length == 0
+    - not github_runner_app_key_stat.stat.exists
+
+# A path on the controller, not the key itself: the prompt stays visible.
+- name: Ask for the GitHub App private key file
+  ansible.builtin.pause:
+    prompt: "[{{ org_id }}] Path of the App private key (.pem) on this workstation"
+  register: github_runner_app_key_path_prompt
+  when: github_runner_app_id_prompt.user_input | default('') | length > 0
+
+- name: Resolve the GitHub App credential (variables, else prompt)
+  ansible.builtin.set_fact:
+    github_runner_app_id_resolved: >-
+      {{ github_runner_app_id if github_runner_app_id | length > 0
+         else github_runner_app_id_prompt.user_input | default('') }}
+    github_runner_app_key_src: >-
+      {{ github_runner_app_private_key_file if github_runner_app_id | length > 0
+         else github_runner_app_key_path_prompt.user_input | default('') }}
+  no_log: true
+
+- name: Check the App private key file on the controller
+  ansible.builtin.stat:
+    path: "{{ github_runner_app_key_src | expanduser }}"
+  delegate_to: localhost
+  become: false
+  register: github_runner_app_key_local
+  when: github_runner_app_id_resolved | length > 0
+  no_log: true
+
+- name: Fail on a missing App private key file
+  ansible.builtin.assert:
+    that: github_runner_app_key_local.stat.exists | default(false)
+    fail_msg: >-
+      GitHub App {{ github_runner_app_id_resolved }} given without a readable private
+      key file: set GITHUB_RUNNER_APP_PRIVATE_KEY_FILE to the .pem path.
+  when: github_runner_app_id_resolved | length > 0
+
+- name: Store the App private key (root only)
+  ansible.builtin.copy:
+    src: "{{ github_runner_app_key_src | expanduser }}"
+    dest: /etc/gh-runner/app.pem
+    owner: root
+    group: root
+    mode: "0600"
+  when: github_runner_app_id_resolved | length > 0
+  diff: false
+  no_log: true
+  notify: Restart gh-runner
+
+- name: Store the App ID
+  ansible.builtin.copy:
+    content: "{{ github_runner_app_id_resolved }}\n"
+    dest: /etc/gh-runner/app-id
+    owner: root
+    group: root
+    mode: "0600"
+  when: github_runner_app_id_resolved | length > 0
+  notify: Restart gh-runner
+
+- name: The runner can register
+  ansible.builtin.set_fact:
+    github_runner_app_ready: "{{ github_runner_app_key_stat.stat.exists or github_runner_app_id_resolved | length > 0 }}"
+
+# --- Service ----------------------------------------------------------------
+
+- name: Install the runner scripts
+  ansible.builtin.copy:
+    src: "{{ item }}"
+    dest: "/usr/local/lib/gh-runner/{{ item }}"
+    owner: root
+    group: root
+    mode: "0755"
+  loop: [prepare.sh, start.sh]
+  notify: Restart gh-runner
+
+- name: Write the runner settings
+  ansible.builtin.template:
+    src: runner.env.j2
+    dest: /etc/gh-runner/runner.env
+    owner: root
+    group: root
+    mode: "0600"
+  notify: Restart gh-runner
+
+- name: Install gh-runner.service
+  ansible.builtin.template:
+    src: gh-runner.service.j2
+    dest: /etc/systemd/system/gh-runner.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart gh-runner
+
+# A restart kills the job in progress, if any (it is re-run from GitHub).
+- name: Enable and start gh-runner
+  ansible.builtin.systemd:
+    name: gh-runner
+    enabled: true
+    state: started
+    daemon_reload: true
+  when: github_runner_app_ready | bool
+
+- name: Warn when the runner cannot register
+  ansible.builtin.debug:
+    msg: >-
+      No GitHub App credential for the runner (GITHUB_RUNNER_APP_ID /
+      GITHUB_RUNNER_APP_PRIVATE_KEY_FILE): gh-runner is installed but not
+      started, and Deploiment's Promote workflow cannot verify staging.
+  when: not github_runner_app_ready | bool
+
+- name: Runner summary
+  ansible.builtin.debug:
+    msg:
+      - >-
+        Runner of {{ github_runner_repo }} on {{ inventory_hostname }}:
+        {{ 'started' if github_runner_app_ready | bool else 'NOT started (no App credential)' }}
+      - "Labels: {{ github_runner_labels | join(', ') }} (runs-on: [{{ github_runner_labels | join(', ') }}])"
+      - "Kubeconfigs:{% for t in github_runner_targets %} /home/{{ github_runner_user }}/.kube/instance-{{ t.env_name }}.yaml{% endfor %}"
+      - "Logs: journalctl -u gh-runner"

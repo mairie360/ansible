@@ -1,0 +1,7 @@
+---
+- name: Restart gh-runner
+  ansible.builtin.systemd:
+    name: gh-runner
+    state: restarted
+    daemon_reload: true
+  when: github_runner_app_ready | default(false) | bool

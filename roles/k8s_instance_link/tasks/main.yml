@@ -162,25 +162,51 @@
 # Deploiment's traefik-appset.yaml takes "traefik", ingress-nginx-appset.yaml
 # everything else. Flipping it makes Argo CD delete one controller and
 # install the other (both AppSets carry the resources finalizer).
+#
+# The mairie360.fr/revision annotation (MAIR-346) is the Deploiment revision
+# this environment follows (deploiment_env_revisions, else
+# deploiment_repo_branch), written only for the environments of
+# deploiment_revision_annotated_envs and removed from the others (the
+# bootstrap AppSets then fall back to `main`). It is an annotation, not a
+# label, because a branch name may hold characters a label value refuses
+# (`/`). Deploiment's bootstrap AppSets read it from their clusters
+# generator (`.metadata.annotations`), so the bootstrap layer of staging and
+# prod only moves when those branches are promoted, like the instance chart.
 # Tagged `labels`: `site.yml --tags labels` re-applies them alone.
-- name: Étiqueter le cluster comme instance du groupe
+- name: Label and annotate the cluster as an instance of the group
   ansible.builtin.shell: |
     set -o pipefail
     SECRET=$(kubectl -n argocd get secrets -l argocd.argoproj.io/secret-type=cluster \
       -o json | jq -r '.items[] | select((.data.name|@base64d)=="{{ env_name }}") | .metadata.name')
-    [ -n "$SECRET" ] || { echo "secret de cluster introuvable"; exit 1; }
+    [ -n "$SECRET" ] || { echo "cluster secret not found"; exit 1; }
     kubectl -n argocd label secret "$SECRET" \
       mairie360.fr/role=instance \
       mairie360.fr/org={{ org_id }} \
       mairie360.fr/env={{ env_name }} \
       mairie360.fr/ingress={{ ingress_controller }} --overwrite
+    # `kubectl annotate` reports "annotated" even when nothing changes:
+    # compare first so that the task stays idempotent. REVISION is empty
+    # for an environment that must not carry the annotation.
+    CURRENT=$(kubectl -n argocd get secret "$SECRET" \
+      -o jsonpath='{.metadata.annotations.mairie360\.fr/revision}')
+    if [ "$CURRENT" != "$REVISION" ]; then
+      if [ -n "$REVISION" ]; then
+        kubectl -n argocd annotate secret "$SECRET" "mairie360.fr/revision=$REVISION" --overwrite
+      else
+        kubectl -n argocd annotate secret "$SECRET" mairie360.fr/revision-
+      fi
+    fi
   args:
     executable: /bin/bash
   delegate_to: "{{ argocd_host }}"
   environment:
     KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+    REVISION: >-
+      {{ (deploiment_env_revisions[env_name] | default(deploiment_repo_branch))
+         if env_name in deploiment_revision_annotated_envs else '' }}
   register: label_result
-  changed_when: "'labeled' in label_result.stdout"
+  # "secret/<name> not labeled" when the labels were already there.
+  changed_when: label_result.stdout is search('(?m)^secret/\\S+ (labeled|annotated)$')
   tags: [labels]
 
 - name: Récapitulatif
@@ -189,4 +215,8 @@
       - "{{ inventory_hostname }} est reliée à l'Argo CD de {{ org_id }}."
       - "Nom du cluster dans Argo CD : {{ env_name }} (via {{ wg_ip }}:6443)"
       - "Values attendues : clusters/{{ org_id }}/instances/{{ env_name }}/values.yaml"
+      - >-
+        Deploiment revision: {{ deploiment_env_revisions[env_name] | default(deploiment_repo_branch) }}
+        (bootstrap/: {{ 'annotation mairie360.fr/revision' if env_name in deploiment_revision_annotated_envs
+        else 'not annotated, main' }})
       - "Secrets: phase 4 (role k8s_instance_secrets) seals them next."

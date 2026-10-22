@@ -6,9 +6,11 @@
 #   ansible-playbook playbooks/site.yml --limit mairie360_argocd:mairie360_instances
 #   ansible-playbook playbooks/site.yml --limit client_example_argocd:client_example_instances
 #
-# The four phases: prepare the k8s base, start the group's Argo CD, link the
-# instances to it once both sides are ready, then seal each instance's
-# secrets (prompting for the external ones that are missing).
+# The five phases: prepare the k8s base, start the group's Argo CD, link the
+# instances to it once both sides are ready, seal each instance's secrets
+# (prompting for the external ones that are missing), then, for groups that
+# promote (github_runner_enabled), install the runner that verifies staging
+# before a promotion to prod.
 #
 # The `*_argocd` / `*_instances` patterns are resolved by Ansible itself:
 # adding a client needs NO change here. Always --limit whole groups
@@ -47,3 +49,15 @@
 
 - name: "Phase 4 — instance secrets"
   ansible.builtin.import_playbook: secrets.yml
+
+# MAIR-346: self-hosted runner of Deploiment's Promote workflow, on the Argo CD
+# machine of the groups that enable it. It needs the instance kubeconfigs of
+# phase 3. `--tags github_runner` re-applies it alone.
+- name: "Phase 5 — promotion runner (groups with github_runner_enabled)"
+  hosts: "*_argocd"
+  become: true
+  serial: 1
+  roles:
+    - role: github_runner
+      when: github_runner_enabled | bool
+      tags: [github_runner]
