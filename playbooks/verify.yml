@@ -115,3 +115,98 @@
       ansible.builtin.assert:
         that: verify.rc == 0
         fail_msg: "scripts/verify.sh failed for {{ inventory_hostname }}, see its output above."
+
+# =============================================================================
+# GDPR configuration of the machines (MAIR-293, epic MAIR-284). Read-only.
+#
+# Every check below that fails is a gap. The play fails on any gap that is not
+# listed in `gdpr_allowed_gaps` (group_vars) with its reason: a known gap is
+# tracked there, never silently ignored. The decisions come from the Deploiment
+# checkout of the group's Argo CD machine (/opt/Deploiment/compliance/<org_id>/,
+# MAIR-294).
+# =============================================================================
+
+- name: "GDPR configuration of the machines"
+  hosts: "*_argocd:*_instances"
+  become: true
+  gather_facts: false
+  vars:
+    compliance_dir: "/opt/Deploiment/compliance/{{ org_id }}"
+    argocd_host: "{{ groups[org_group ~ '_argocd'][0] }}"
+  tasks:
+    - name: Read the access decisions of the mairie (Deploiment compliance/)
+      ansible.builtin.command: "cat {{ compliance_dir }}/access.yaml"
+      delegate_to: "{{ argocd_host }}"
+      register: access_file
+      changed_when: false
+      failed_when: false
+
+    - name: Read the retention decisions of the mairie (Deploiment compliance/)
+      ansible.builtin.command: "cat {{ compliance_dir }}/retention.yaml"
+      delegate_to: "{{ argocd_host }}"
+      register: retention_file
+      changed_when: false
+      failed_when: false
+
+    - name: Read this machine's WireGuard public key
+      ansible.builtin.command: cat /etc/wireguard/public.key
+      register: wg_self_key
+      changed_when: false
+      failed_when: false
+
+    - name: Collect the GDPR-relevant state of the machine
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          echo "auditd=$(systemctl is-active auditd 2>/dev/null || true)"
+          sshd -T 2>/dev/null | awk '$1=="passwordauthentication"||$1=="permitrootlogin"{print $1"="$2}'
+          # A public rule for 22 is one without "on wg0".
+          ufw status 2>/dev/null | grep -E '^22(/tcp)? ' | grep -vq ' on wg0' && echo "public_ssh=open" || echo "public_ssh=closed"
+          echo "secrets_encryption=$(k3s secrets-encrypt status 2>/dev/null | awk -F': *' '/Encryption Status/{print $2}')"
+          echo "unattended_upgrades=$(apt-config dump 2>/dev/null | awk -F'"' '/^APT::Periodic::Unattended-Upgrade /{print $2}')"
+          echo "disk_encrypted=$(lsblk -no TYPE 2>/dev/null | grep -qx crypt && echo yes || echo no)"
+          echo "journald_retention=$(systemd-analyze cat-config systemd/journald.conf 2>/dev/null | awk -F= '/^MaxRetentionSec=/{v=$2} END{print v}')"
+          for f in /root/.ssh/authorized_keys /home/*/.ssh/authorized_keys; do
+            [ -f "$f" ] && ssh-keygen -lf "$f" 2>/dev/null | awk '{print "ssh_key="$2}'
+          done
+          wg show wg0 peers 2>/dev/null | sed 's/^/wg_peer=/'
+      args:
+        executable: /bin/bash
+      register: gdpr_state
+      changed_when: false
+
+    - name: Collect the Argo CD accounts
+      ansible.builtin.shell: |
+        set -o pipefail
+        kubectl -n argocd get configmap argocd-cm -o json \
+          | jq -r '.data // {} | keys[] | select(startswith("accounts.")) | select(endswith(".enabled") | not) | ltrimstr("accounts.")'
+      args:
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      register: argocd_accounts
+      changed_when: false
+      when: inventory_hostname in groups[org_group ~ '_argocd']
+
+    - name: Compute the GDPR gaps of the machine
+      ansible.builtin.set_fact:
+        gdpr_gaps: "{{ lookup('ansible.builtin.template', 'gdpr_gaps.j2') | from_yaml }}"
+      vars:
+        state: "{{ gdpr_state.stdout_lines | map('split', '=', 1) | list }}"
+        access: "{{ (access_file.stdout | default('') | from_yaml) if access_file.rc == 0 else None }}"
+        retention: "{{ (retention_file.stdout | default('') | from_yaml) if retention_file.rc == 0 else None }}"
+        group_wg_keys: "{{ groups[org_group ~ '_argocd'] + groups[org_group ~ '_instances'] | default([]) }}"
+
+    - name: Report the GDPR gaps
+      ansible.builtin.debug:
+        msg: "{{ item.id }}: {{ item.message }}{{ ' (allowed: ' ~ gdpr_allowed_gaps[item.id] ~ ')' if item.id in gdpr_allowed_gaps else '' }}"
+      loop: "{{ gdpr_gaps }}"
+      loop_control:
+        label: "{{ item.id }}"
+
+    - name: No GDPR gap outside the allowed ones
+      ansible.builtin.assert:
+        that: gdpr_gaps | rejectattr('id', 'in', gdpr_allowed_gaps | list) | list | length == 0
+        fail_msg: >-
+          {{ inventory_hostname }}: {{ gdpr_gaps | rejectattr('id', 'in', gdpr_allowed_gaps | list) | map(attribute='id') | join(', ') }}.
+          Fix them, or list each in gdpr_allowed_gaps (group_vars) with its reason.
