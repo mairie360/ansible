@@ -1,6 +1,7 @@
 # Images followed by argocd-image-updater in every instance of the group.
 # `path` is the Helm values path of the instance in charts/mairie360-stack
-# (APIs|BFFs|Fronts.instances.<key>). Keep in sync with the instance keys of
+# (APIs|BFFs|Fronts.instances.<key>, or the database / liquibase subchart,
+# tracked like the others since MAIR-444). Keep in sync with the instance keys of
 # Deploiment/clusters/*/instances/*/values.yaml.
 # Note the project-front key vs projects-front image: the alias follows the
 # key, the image follows the registry.
@@ -26,9 +27,46 @@ image_updater_services:
   - { alias: elearning-front, image: ghcr.io/mairie360/elearning-front,     path: Fronts.instances.elearning-front }
   - { alias: admin-front,     image: ghcr.io/mairie360/administrator-front, path: Fronts.instances.admin-front }
 
-# Tag policy per environment name. Any env not listed (a client's `prod`, for
-# instance) gets `default`: released semver tags only.
+  # The Postgres server image (a new tag restarts the StatefulSet) and the
+  # migrations, applied by the Liquibase Sync hook on the next sync.
+  - { alias: database,        image: ghcr.io/mairie360/database,            path: database }
+  - { alias: liquibase,       image: ghcr.io/mairie360/liquibase-migrations, path: liquibase }
+
+# Environments followed by argocd-image-updater, by environment name. An
+# environment NOT listed gets no ImageUpdater: its images are exactly the tags
+# pinned in Deploiment, nothing else. That is the case of prod and of every
+# client instance (MAIR-186): their versions only change through a reviewed
+# Deploiment commit promoted main -> staging -> prod, so a Promote rollback
+# also rolls the images back.
+#
+# Every listed environment writes its tags to git (MAIR-444), into
+# clusters/<org>/instances/<env>/<target> of Deploiment. Needs
+# argocd/deploiment-git-creds (DEPLOIMENT_GIT_USER / DEPLOIMENT_GIT_TOKEN,
+# contents + pull requests write).
+#   pull_request: true   a PR on deploiment_repo_branch (main), squash-merged
+#                        by Deploiment's image-updater-automerge workflow once
+#                        CI passes (dev follows main).
+#   pull_request: false  a direct commit on `branch`: staging's tags go onto
+#                        the `staging` branch, into images.yaml, a file main
+#                        never edits, so Promote can still merge main into
+#                        staging (Deploiment docs/adr/0002-environment-promotion.md).
 image_updater_policies:
-  dev:     { strategy: newest-build, allow_tags: "regexp:^dev-.*" }
-  staging: { strategy: newest-build, allow_tags: "regexp:^staging-.*" }
-  default: { strategy: semver,       allow_tags: "regexp:^v?[0-9]+\\.[0-9]+\\.[0-9]+$" }
+  dev:
+    strategy: newest-build
+    allow_tags: "regexp:^dev-.*"
+    pull_request: true
+    target: values.yaml
+  staging:
+    strategy: newest-build
+    allow_tags: "regexp:^staging-.*"
+    pull_request: false
+    branch: staging
+    target: images.yaml
+
+# Image tags that a former `argocd` write-back left in the Helm parameters of
+# an instance Application override its values.yaml, outside git. The role
+# lists them and stops before the ApplicationSet stops preserving them. Pin
+# the listed tags in Deploiment first (prod: clusters/_base/prod.yaml; dev and
+# staging: the git write-back commits the newest tags on its next pass), then
+# re-run once with -e image_updater_clear_parameters=true to remove them.
+image_updater_clear_parameters: false

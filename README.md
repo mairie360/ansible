@@ -27,7 +27,7 @@ réseau vers un autre : l'isolation vient de la topologie.
 |---|---|---|---|
 | 1 | `k8s_node` | all | Hardening, firewall (6443 only from the group's Argo CD, over `wg0`), k3s (Traefik disabled, ServiceLB on), Cilium CNI + Hubble |
 | 1b | `wireguard` | all | Group tunnel: the Argo CD machine listens, the instances connect to it |
-| 2 | `k8s_argocd` | `*_argocd` | Argo CD + `platform-app.yaml` + the group's ApplicationSet, `argocd/ghcr-secret`, one `ImageUpdater` per instance |
+| 2 | `k8s_argocd` | `*_argocd` | Argo CD + `platform-app.yaml` + the group's ApplicationSet, `argocd/ghcr-secret`, `argocd/deploiment-git-creds`, one `ImageUpdater` per dev / staging instance |
 | 3 | `k8s_instance_link` | `*_instances` | `argocd cluster add` on the WireGuard IP + labels (`mairie360.fr/role`, `org`, `env`, `ingress`) |
 | 4 | `k8s_instance_secrets` | `*_instances` | Seals the instance secrets with `seal-secrets.sh`, asks for the missing external ones, copies `secrets.yaml` back to the local `Deploiment` checkout |
 
@@ -136,24 +136,55 @@ unblock it, on the Argo CD machine (the kubeconfig is written by phase 3, with
 sudo KUBECONFIG=/root/.kube/argocd-cli.yaml argocd app terminate-op <env> --core
 ```
 
-Migrating a group whose Applications are still multi-source (every group
-provisioned before MAIR-173): re-run `site.yml` on the whole group. The
-ApplicationSet is per group, so all its instances switch at once (there is no
-"dev first" here). Phase 2 carries the image tags written by
-argocd-image-updater over to the new layout, then:
+A group whose Applications are still multi-source (provisioned before
+MAIR-173) switches to the single-source layout on the next `site.yml` run,
+all its instances at once (the ApplicationSet is per group). Check it with:
 
 ```bash
-# On the Argo CD machine: every instance Application is single-source...
+# On the Argo CD machine: every instance Application is single-source
 sudo kubectl -n argocd get applications.argoproj.io \
   -o custom-columns='NAME:.metadata.name,SOURCE:.spec.source.path,SOURCES:.spec.sources[*].ref'
-# ...and still carries its image tags (not the values.yaml ones)
-sudo kubectl -n argocd get applications.argoproj.io <env> -o jsonpath='{.spec.source.helm.parameters}'
 
 ansible-playbook playbooks/verify.yml
 ```
 
 Acceptance test: push a commit to `Deploiment` `main` while an instance is
 syncing, and check that it converges on the new commit on its own.
+
+## Image tags (MAIR-186, MAIR-444)
+
+What runs on an instance is always what `Deploiment` says: argocd-image-updater
+never writes into the Applications any more, and the instances ApplicationSet
+no longer preserves their Helm parameters, so a parameter set by hand is
+reverted and shown as drift.
+
+| Environment | Who moves the image tags | Where |
+|---|---|---|
+| dev | argocd-image-updater, newest `dev-<sha>` | a `chore(deps)` PR on `main` editing `clusters/<org>/instances/dev/values.yaml`, auto-merged by Deploiment's `image-updater-automerge` workflow once CI passes |
+| staging | argocd-image-updater, newest `staging-<sha>` | a commit on the `staging` branch into `clusters/<org>/instances/staging/images.yaml` (read after `values.yaml`); staging syncs by itself |
+| prod, clients | nobody: no `ImageUpdater` | the tags pinned in `clusters/_base/prod.yaml`, moved by a reviewed commit and a `Promote` |
+
+Every service is tracked, `database` and `liquibase-migrations` included. The
+policies live in `image_updater_policies` (`roles/k8s_argocd/defaults/main.yml`).
+The write-back needs a fine-grained token on `mairie360/Deploiment` (contents
+and pull requests read/write): `DEPLOIMENT_GIT_USER` / `DEPLOIMENT_GIT_TOKEN`,
+else the `argocd/deploiment-git-creds` already on the Argo CD machine, else a
+prompt.
+
+**Switching a group that ran the former image-updater.** Phase 2 deletes the
+`ImageUpdater` of every environment no longer followed (prod), then lists the
+tags it left in the Applications' Helm parameters and **stops** while any is
+left: dropping them silently would roll the instance back to its pinned tags.
+
+```bash
+# 1. First run: the play stops and prints, per Application, the tags written outside git.
+ansible-playbook playbooks/site.yml --limit mairie360_argocd:mairie360_instances
+# 2. Pin the prod tags to keep in Deploiment clusters/_base/prod.yaml (PR + Promote).
+#    dev and staging need nothing: the git write-back commits the newest tags on its next pass.
+# 3. Remove the leftover parameters; the ApplicationSet then follows git only.
+ansible-playbook playbooks/site.yml --limit mairie360_argocd:mairie360_instances \
+  -e image_updater_clear_parameters=true
+```
 
 ## Secrets
 
@@ -181,7 +212,9 @@ one that reaches the instance API server, through the tunnel. For each instance:
   and keeps it on later runs; this role cannot yet read that value back to
   deposit it on the workstation (tracked in `roles/k8s_instance_secrets/tasks/main.yml`);
 - GHCR credentials come from `GHCR_USER` / `GHCR_TOKEN`, else from
-  `argocd/ghcr-secret` (phase 2 prompts for it once per group);
+  `argocd/ghcr-secret` (phase 2 prompts for it once per group); the Deploiment
+  write-back token the same way, from `DEPLOIMENT_GIT_USER` /
+  `DEPLOIMENT_GIT_TOKEN`, else `argocd/deploiment-git-creds`;
 - `secrets.yaml` is copied into the local `Deploiment` checkout, and the
   instance sealing key into `~/.mairie360/sealing-keys/<org>-<env>.yaml`.
   Store that key in the team vault: without it, a reinstall makes every
@@ -216,6 +249,7 @@ git-ignored. Before committing a role change, run the static check:
 python3 tests/check_no_log.py       # fails on a secret-handling task without no_log
 python3 tests/check_gdpr_config.py  # fails when Hubble metrics are labelled with IP addresses
 ansible-playbook tests/gdpr_gaps_test.yml   # the GDPR gaps of verify.yml, on localhost
+ansible-playbook tests/image_updater_test.yml   # no ImageUpdater in prod, git write-back for dev/staging
 ```
 
 ## GDPR checks of the machines (MAIR-293)
