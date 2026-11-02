@@ -92,6 +92,9 @@ git show "$(git log -1 --format=%H --diff-filter=D -- inventory/hosts.yml)^:inve
 
 `python3 tests/check_no_public_ip.py` (also run by CI) fails when a tracked file
 holds a public IPv4 address; private and documentation ranges are allowed.
+CI also runs Gitleaks on every new commit (MAIR-677): a token, password or
+private key in a commit fails the push or pull request. Encrypt secrets with
+Ansible Vault (its ciphertext is allowed); if one was pushed, rotate it first.
 
 ```bash
 ansible-galaxy collection install -r requirements.yml
@@ -250,6 +253,7 @@ python3 tests/check_no_log.py       # fails on a secret-handling task without no
 python3 tests/check_gdpr_config.py  # fails when Hubble metrics are labelled with IP addresses
 ansible-playbook tests/gdpr_gaps_test.yml   # the GDPR gaps of verify.yml, on localhost
 ansible-playbook tests/image_updater_test.yml   # no ImageUpdater in prod, git write-back for dev/staging
+bash tests/mair_677_secret_scan_test.sh   # Gitleaks blocks tokens and keys, not vault ciphertext (docker)
 ```
 
 ## GDPR checks of the machines (MAIR-293)

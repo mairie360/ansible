@@ -1,5 +1,5 @@
 # Static checks of the repository: no public IP address in a tracked file (MAIR-708),
-# image-updater templates (MAIR-186, MAIR-444).
+# image-updater templates (MAIR-186, MAIR-444), no secret in new commits (MAIR-677).
 name: Checks
 
 on:
@@ -11,6 +11,21 @@ permissions:
   contents: read
 
 jobs:
+  secret-scan:
+    # MAIR-677: this repository is public. Gitleaks (default rules) blocks any
+    # new commit that adds a secret; Ansible Vault ciphertext is not reported.
+    name: Secret scan (Gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Run Gitleaks on the new commits
+        uses: mairie360/CICD/actions/security/gitleaks@v4.12.1
+      - name: Check the scan rules (blocks tokens and keys, lets vault ciphertext through)
+        run: bash tests/mair_677_secret_scan_test.sh
+
   no-public-ip:
     runs-on: ubuntu-latest
     steps:
