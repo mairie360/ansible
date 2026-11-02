@@ -43,4 +43,7 @@ hubble:
       - port-distribution
       - icmp
       - policy
-      - "httpV2:exemplars=true;labelsContext=source_ip,source_namespace,source_workload,destination_ip,destination_namespace,destination_workload,traffic_direction"
+      # No source_ip / destination_ip label (MAIR-293): a pod IP is enough to
+      # trace a request back to an agent's client through the ingress, and the
+      # workload labels below already say which hop it was.
+      - "httpV2:exemplars=true;labelsContext=source_namespace,source_workload,destination_namespace,destination_workload,traffic_direction"

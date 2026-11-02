@@ -1,0 +1,29 @@
+---
+# =============================================================================
+# The Resend API key is mandatory at the first sealing (MAIR-599)
+#
+# Keycloak imports its realm, Resend SMTP relay included, only once: on the
+# first start, reading SMTP_PASSWORD from <env>-app-secrets. A first sealing
+# with an empty key leaves Keycloak's SMTP broken for good (re-sealing later
+# only fixes core-api; the realm then has to be edited in the admin console).
+#
+# "First sealing" = <env>-keycloak-secret is not on the instance yet. Facts
+# only, so that tests/seal_passwords_test.yml runs it on localhost:
+#   keycloak_on_cluster   <env>-keycloak-secret exists on the instance;
+#   on_cluster            .resend_api_key: SMTP_PASSWORD already sealed;
+#   resolved_secrets      .resend_api_key: from variables or the prompt.
+# =============================================================================
+
+- name: Fail when the first sealing has no Resend API key
+  ansible.builtin.assert:
+    that: >-
+      keycloak_on_cluster | bool
+      or on_cluster.resend_api_key | bool
+      or resolved_secrets.resend_api_key | length > 0
+    quiet: true
+    fail_msg: >-
+      First sealing of {{ inventory_hostname }} ({{ env_name }}-keycloak-secret
+      is not on the instance yet) without a Resend API key: Keycloak imports
+      its SMTP settings only once, an empty key would break its e-mails for
+      good. Set instance_secrets[{{ inventory_hostname }}].resend_api_key,
+      export RESEND_API_KEY, or answer the prompt (MAIR-599).

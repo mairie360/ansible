@@ -1,0 +1,67 @@
+---
+# =============================================================================
+# Generated secrets backed up on the operator's machine (MAIR-599)
+#
+# Resolves RESTIC_PASSWORD and the admin account's first ADMIN_PASSWORD from
+# facts only, so that tests/seal_passwords_test.yml runs it on localhost
+# without any cluster. Inputs:
+#   generated_on_cluster  {restic_password, admin_password}: values sealed on
+#                         the instance, '' when absent;
+#   generated_backups     {restic_password, admin_password}: contents of the
+#                         operator's backup files, '' when absent.
+# Sets:
+#   generated_sources        where each value comes from (no secret, printed);
+#   generated_seal           the values passed to seal-secrets.sh;
+#   generated_backup_writes  the plaintexts to write into the backup files.
+#
+# Per secret, the instance wins over the backup file, and the file over a new
+# value. A value already sealed on the instance is NEVER replaced: a new
+# RESTIC_PASSWORD makes every existing backup unreadable. The backup file
+# also covers a re-run before the first secrets.yaml is pushed and synced
+# (the instance has nothing yet): the value sealed again is the one already
+# backed up, not a new one.
+#
+# ADMIN_PASSWORD: the instance holds its argon2id hash (MAIR-414). That hash
+# is passed back as-is (seal-secrets.sh seals a `$argon2id$` value
+# unchanged) and the backup file is left alone, since the plaintext cannot be
+# derived from the hash. A plaintext still sealed from before MAIR-414 is
+# passed in and backed up; seal-secrets.sh seals its hash. Otherwise the
+# plaintext (backup file or new) is passed in: seal-secrets.sh seals its
+# hash and, ADMIN_PASSWORD being set, writes no file on the Argo CD machine.
+# The plaintext only ever lives in the operator's backup file.
+#
+# New values are hex, like the ones seal-secrets.sh generates (URL-safe).
+# =============================================================================
+
+- name: Resolve where RESTIC_PASSWORD and ADMIN_PASSWORD come from
+  ansible.builtin.set_fact:
+    generated_sources:
+      restic_password: >-
+        {{ 'cluster' if generated_on_cluster.restic_password | length > 0
+           else ('backup' if generated_backups.restic_password | length > 0 else 'generated') }}
+      admin_password: >-
+        {{ 'cluster' if generated_on_cluster.admin_password.startswith('$argon2id$')
+           else ('cluster-plaintext' if generated_on_cluster.admin_password | length > 0
+           else ('backup' if generated_backups.admin_password | length > 0 else 'generated')) }}
+
+- name: Resolve the values passed to seal-secrets.sh
+  ansible.builtin.set_fact:
+    generated_seal:
+      restic_password: >-
+        {{ generated_on_cluster.restic_password if generated_sources.restic_password == 'cluster'
+           else (generated_backups.restic_password if generated_sources.restic_password == 'backup'
+           else lookup('ansible.builtin.password', '/dev/null', chars=['digits', 'abcdef'], length=64)) }}
+      admin_password: >-
+        {{ generated_on_cluster.admin_password if generated_sources.admin_password in ['cluster', 'cluster-plaintext']
+           else (generated_backups.admin_password if generated_sources.admin_password == 'backup'
+           else lookup('ansible.builtin.password', '/dev/null', chars=['digits', 'abcdef'], length=64)) }}
+  no_log: true
+
+# Not the admin hash: the backup file keeps the plaintext it already holds.
+- name: Resolve the plaintexts to back up on the operator's machine
+  ansible.builtin.set_fact:
+    generated_backup_writes: >-
+      {{ {'restic_password': generated_seal.restic_password}
+         | combine({'admin_password': generated_seal.admin_password}
+                   if generated_sources.admin_password != 'cluster' else {}) }}
+  no_log: true

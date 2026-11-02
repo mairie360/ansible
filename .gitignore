@@ -6,3 +6,6 @@
 # the phase 4 playbook and must stay tracked).
 /secrets.yml
 .env
+# The real inventory (MAIR-708): it holds the public addresses of the machines and this
+# repository is public. inventory/hosts.example.yml is the template.
+/inventory/hosts.yml

@@ -12,9 +12,12 @@
 # what used to go wrong.
 # =============================================================================
 
+# argon2: Deploiment's scripts/seal-secrets.sh, run on this machine, seals
+# the admin account's password as an argon2id hash (MAIR-414) and falls back
+# on the argon2 CLI when OpenSSL is older than 3.2 (Ubuntu 24.04 ships 3.0).
 - name: Installer les dépendances du rôle
   ansible.builtin.apt:
-    name: [git, curl]
+    name: [git, curl, argon2]
     state: present
     update_cache: true
     cache_valid_time: 3600
@@ -91,27 +94,97 @@
     dest: /opt/Deploiment/instances-appset.yaml
     mode: "0644"
 
-# Migration from the multi-source layout (MAIR-173). Instance Applications
-# used to be multi-source, so argocd-image-updater stored its tags under
-# spec.sources[0].helm.parameters. The single-source AppSet only preserves
-# spec.source.helm.parameters: without this carry-over, every instance would
-# fall back to the tags of its values.yaml until the image updater's next
-# pass. No-op once every Application is single-source.
-- name: Save the image tags of multi-source instance Applications
+# --- Image tags outside git (MAIR-186, MAIR-444) -----------------------------
+# argocd-image-updater only writes to git now, and only for the environments
+# of image_updater_policies. Before the ApplicationSet stops preserving the
+# Applications' Helm parameters, delete the ImageUpdaters of the environments
+# no longer followed (prod, client instances) and deal with the tags a former
+# `argocd` write-back left in those parameters: they override values.yaml, so
+# dropping them silently would roll an instance back to its pinned tags.
+
+- name: List the ImageUpdaters on this machine
+  ansible.builtin.command: >
+    kubectl -n argocd get imageupdaters.argocd-image-updater.argoproj.io
+    -o jsonpath={.items[*].metadata.name}
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  register: imageupdaters_live
+  changed_when: false
+  # The CRD does not exist yet on a fresh machine: nothing to delete.
+  failed_when: false
+
+- name: Delete the ImageUpdaters of environments no longer followed
+  ansible.builtin.command: >
+    kubectl -n argocd delete imageupdaters.argocd-image-updater.argoproj.io {{ item }}
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  loop: >-
+    {{ (imageupdaters_live.stdout.split() if imageupdaters_live.rc == 0 else [])
+       | difference(groups[org_group ~ '_instances'] | default([])
+                    | map('extract', hostvars, 'env_name')
+                    | select('in', image_updater_policies.keys() | list) | list) }}
+  changed_when: true
+
+# Single-source Applications keep them in spec.source, the former
+# multi-source layout (MAIR-173) in spec.sources[0].
+- name: List the image tags left in instance Application parameters
   ansible.builtin.shell: |
     set -o pipefail
     kubectl -n argocd get applications.argoproj.io -o json | jq -c '
       [.items[]
        | select(any(.metadata.ownerReferences[]?; .kind == "ApplicationSet" and .name == "instances"))
-       | select(.spec.sources != null)
-       | {name: .metadata.name, parameters: (.spec.sources[0].helm.parameters // [])}
+       | if .spec.sources != null
+         then {name: .metadata.name, path: "/spec/sources/0/helm/parameters", parameters: (.spec.sources[0].helm.parameters // [])}
+         else {name: .metadata.name, path: "/spec/source/helm/parameters", parameters: (.spec.source.helm.parameters // [])}
+         end
        | select(.parameters | length > 0)]'
   args:
     executable: /bin/bash
   environment:
     KUBECONFIG: /etc/rancher/k3s/k3s.yaml
-  register: multisource_apps
+  register: leftover_parameters
   changed_when: false
+
+- name: Report the image tags set outside git
+  ansible.builtin.debug:
+    msg:
+      - "{{ item.name }} runs on tags written outside git by argocd-image-updater; they override its values:"
+      - "{{ item.parameters | map(attribute='name') | zip(item.parameters | map(attribute='value')) | map('join', ' = ') | list }}"
+  loop: "{{ leftover_parameters.stdout | from_json }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Stop until the leftover tags are pinned in Deploiment
+  ansible.builtin.fail:
+    msg: >-
+      {{ (leftover_parameters.stdout | from_json) | map(attribute='name') | join(', ') }}
+      still run on the image tags listed above. Pin the ones to keep in
+      Deploiment (prod: clusters/_base/prod.yaml through a Promote; dev and
+      staging: the git write-back commits the newest tags on its next pass),
+      then re-run with -e image_updater_clear_parameters=true.
+  when:
+    - leftover_parameters.stdout | from_json | length > 0
+    - not image_updater_clear_parameters | bool
+
+- name: Remove the leftover image parameters
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - -n
+      - argocd
+      - patch
+      - applications.argoproj.io
+      - "{{ item.name }}"
+      - --type=json
+      - -p
+      - "{{ [{'op': 'remove', 'path': item.path}] | to_json }}"
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  loop: "{{ leftover_parameters.stdout | from_json }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when: image_updater_clear_parameters | bool
+  changed_when: true
 
 # This file scopes the Argo CD to `clusters/{{ org_id }}/instances/*`. It is
 # not versioned in Deploiment because it depends on org_id: each group has its
@@ -122,39 +195,6 @@
     KUBECONFIG: /etc/rancher/k3s/k3s.yaml
   register: appset_apply
   changed_when: "'created' in appset_apply.stdout or 'configured' in appset_apply.stdout"
-
-- name: Wait for the ApplicationSet to convert the instance Applications
-  ansible.builtin.command: >
-    kubectl -n argocd get applications.argoproj.io {{ item.name }}
-    -o jsonpath={.spec.source.repoURL}
-  environment:
-    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
-  register: converted
-  changed_when: false
-  retries: 30
-  delay: 2
-  until: converted.stdout | length > 0
-  loop: "{{ multisource_apps.stdout | from_json }}"
-  loop_control:
-    label: "{{ item.name }}"
-
-- name: Restore the image tags on the converted Applications
-  ansible.builtin.command:
-    argv:
-      - kubectl
-      - -n
-      - argocd
-      - patch
-      - applications.argoproj.io
-      - "{{ item.name }}"
-      - --type=merge
-      - -p
-      - "{{ {'spec': {'source': {'helm': {'parameters': item.parameters}}}} | to_json }}"
-  environment:
-    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
-  loop: "{{ multisource_apps.stdout | from_json }}"
-  loop_control:
-    label: "{{ item.name }}"
 
 # --- GHCR credentials (argocd/ghcr-secret) ------------------------------------
 # argocd-image-updater reads the GHCR tags with pullsecret:argocd/ghcr-secret
@@ -232,6 +272,99 @@
       No GHCR credentials (GHCR_USER / GHCR_TOKEN): argocd-image-updater cannot
       list tags, image tags will not be updated automatically.
   when: ghcr_resolved_token | length == 0
+
+# --- Deploiment write credentials (argocd/deploiment-git-creds) ---------------
+# Read by argocd-image-updater to commit the image tags of the environments of
+# image_updater_policies (MAIR-444): a pull request on Deploiment main for
+# dev, a direct commit on the staging branch for staging. Only asked when the
+# group has such an environment.
+
+- name: List the environments followed by argocd-image-updater
+  ansible.builtin.set_fact:
+    image_updater_git_envs: >-
+      {{ groups[org_group ~ '_instances'] | default([])
+         | map('extract', hostvars, 'env_name')
+         | select('in', image_updater_policies.keys() | list)
+         | list }}
+
+- name: Read the Deploiment credentials already stored on this machine
+  ansible.builtin.shell: |
+    set -o pipefail
+    kubectl -n argocd get secret deploiment-git-creds -o json 2>/dev/null \
+      | jq -c '.data | {username: (.username | @base64d), password: (.password | @base64d)}' \
+      || echo '{}'
+  args:
+    executable: /bin/bash
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  register: deploiment_git_existing
+  changed_when: false
+  no_log: true
+  when: image_updater_git_envs | length > 0
+
+- name: Resolve the Deploiment credentials (variables, else this machine)
+  ansible.builtin.set_fact:
+    deploiment_git_resolved_user: "{{ deploiment_git_user if deploiment_git_token | length > 0 else (deploiment_git_existing.stdout | from_json).username | default('', true) }}"
+    deploiment_git_resolved_token: "{{ deploiment_git_token if deploiment_git_token | length > 0 else (deploiment_git_existing.stdout | from_json).password | default('', true) }}"
+  no_log: true
+  when: image_updater_git_envs | length > 0
+
+- name: Ask for the Deploiment git user
+  ansible.builtin.pause:
+    prompt: "[{{ org_id }}] Deploiment git user for the image tag commits ({{ image_updater_git_envs | join(', ') }}; empty to skip)"
+  register: deploiment_git_user_prompt
+  when:
+    - image_updater_git_envs | length > 0
+    - secrets_prompt | bool
+    - deploiment_git_resolved_token | length == 0
+
+- name: Ask for the Deploiment git token
+  ansible.builtin.pause:
+    prompt: "[{{ org_id }}] Deploiment token (contents + pull requests read/write, hidden, empty to skip)"
+    echo: false
+  register: deploiment_git_token_prompt
+  when:
+    - image_updater_git_envs | length > 0
+    - secrets_prompt | bool
+    - deploiment_git_resolved_token | length == 0
+    - deploiment_git_user_prompt.user_input | default('') | length > 0
+  no_log: true
+
+- name: Keep the prompted Deploiment credentials
+  ansible.builtin.set_fact:
+    deploiment_git_resolved_user: "{{ deploiment_git_user_prompt.user_input }}"
+    deploiment_git_resolved_token: "{{ deploiment_git_token_prompt.user_input }}"
+  when: deploiment_git_token_prompt.user_input | default('') | length > 0
+  no_log: true
+
+- name: Write argocd/deploiment-git-creds
+  ansible.builtin.shell: |
+    set -o pipefail
+    kubectl -n argocd create secret generic deploiment-git-creds \
+      --from-literal=username="$GIT_USER" --from-literal=password="$GIT_TOKEN" \
+      --dry-run=client -o yaml | kubectl apply -f -
+  args:
+    executable: /bin/bash
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+    GIT_USER: "{{ deploiment_git_resolved_user }}"
+    GIT_TOKEN: "{{ deploiment_git_resolved_token }}"
+  register: deploiment_git_apply
+  changed_when: "'unchanged' not in deploiment_git_apply.stdout"
+  when:
+    - image_updater_git_envs | length > 0
+    - deploiment_git_resolved_token | length > 0
+  no_log: true
+
+- name: Warn when no Deploiment credentials are available
+  ansible.builtin.debug:
+    msg: >-
+      No Deploiment credentials (DEPLOIMENT_GIT_USER / DEPLOIMENT_GIT_TOKEN):
+      argocd-image-updater cannot commit the image tags of
+      {{ image_updater_git_envs | join(', ') }}.
+  when:
+    - image_updater_git_envs | length > 0
+    - deploiment_git_resolved_token | length == 0
 
 # --- argocd-image-updater: one ImageUpdater per instance ----------------------
 # The CRD is installed by the argocd-image-updater Application that

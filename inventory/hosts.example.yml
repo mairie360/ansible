@@ -1,18 +1,25 @@
 # =============================================================================
-# Inventaire Mairie360
+# Mairie360 inventory: EXAMPLE (MAIR-708)
 #
-# MODÈLE : un groupe = un Argo CD + ses instances. Chaque machine est un
-# cluster k3s mono-nœud.
+# The real inventory, inventory/hosts.yml, is gitignored: this repository is
+# public and must not publish the addresses of the machines. Copy this file to
+# inventory/hosts.yml and put the real addresses there (ask the team for the
+# current one); ansible.cfg reads inventory/hosts.yml. The addresses below are
+# documentation ones (RFC 5737), `wg_ip` are private WireGuard addresses.
+# tests/check_no_public_ip.py fails when a tracked file holds a public IP.
 #
-#   <org>_argocd     : LA machine qui porte l'Argo CD du groupe
-#   <org>_instances  : les machines qui portent une instance Mairie360
+# MODEL: one group = one Argo CD + its instances. Each machine is a
+# single-node k3s cluster.
 #
-# Les playbooks ciblent les motifs `*_argocd` et `*_instances` : ajouter un
-# client se fait ICI uniquement, aucun playbook ni rôle à modifier.
+#   <org>_argocd     : THE machine holding the group's Argo CD
+#   <org>_instances  : the machines holding a Mairie360 instance
 #
-# ansible_host = IP par laquelle le CONTRÔLEUR Ansible joint la machine (SSH).
-# La liaison Argo CD -> instance passe par l'IP WireGuard (`wg_ip`), jamais
-# par l'IP publique : le port 6443 ne doit jamais être exposé sur Internet.
+# The playbooks target the `*_argocd` and `*_instances` patterns: adding a
+# client is done HERE only, no playbook or role to change.
+#
+# ansible_host = address the Ansible CONTROLLER reaches the machine on (SSH).
+# Argo CD -> instance traffic goes through the WireGuard address (`wg_ip`),
+# never the public one: port 6443 must never be exposed on the Internet.
 # =============================================================================
 all:
   children:
@@ -21,27 +28,29 @@ all:
     mairie360_argocd:
       hosts:
         mairie360-argocd:
-          ansible_host: "212.47.242.79"
+          ansible_host: "203.0.113.10"
           wg_ip: "10.10.0.1"
 
     mairie360_instances:
       hosts:
         mairie360-dev:
-          ansible_host: "163.172.7.159"
+          ansible_host: "203.0.113.11"
           wg_ip: "10.10.0.11"
           env_name: dev
           instance_domain: "dev.mairie360-eip.fr"
           ingress_controller: traefik
         mairie360-staging:
-          ansible_host: "195.154.157.114"
+          ansible_host: "203.0.113.12"
           wg_ip: "10.10.0.12"
           env_name: staging
           instance_domain: "staging.mairie360-eip.fr"
+          ingress_controller: traefik
         mairie360-prod:
-          ansible_host: "51.15.251.220"
+          ansible_host: "203.0.113.13"
           wg_ip: "10.10.0.13"
           env_name: prod
           instance_domain: "prod.mairie360-eip.fr"
+          ingress_controller: traefik
 
     # ------------------------------------------------------------ client-example
     # Modèle pour un vrai client : deux machines suffisent. Utiliser un

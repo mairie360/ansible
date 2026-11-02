@@ -27,7 +27,7 @@ réseau vers un autre : l'isolation vient de la topologie.
 |---|---|---|---|
 | 1 | `k8s_node` | all | Hardening, firewall (6443 only from the group's Argo CD, over `wg0`), k3s (Traefik disabled, ServiceLB on), Cilium CNI + Hubble |
 | 1b | `wireguard` | all | Group tunnel: the Argo CD machine listens, the instances connect to it |
-| 2 | `k8s_argocd` | `*_argocd` | Argo CD + `platform-app.yaml` + the group's ApplicationSet, `argocd/ghcr-secret`, one `ImageUpdater` per instance |
+| 2 | `k8s_argocd` | `*_argocd` | Argo CD + `platform-app.yaml` + the group's ApplicationSet, `argocd/ghcr-secret`, `argocd/deploiment-git-creds`, one `ImageUpdater` per dev / staging instance |
 | 3 | `k8s_instance_link` | `*_instances` | `argocd cluster add` on the WireGuard IP + labels (`mairie360.fr/role`, `org`, `env`, `ingress`) + annotation `mairie360.fr/revision` |
 | 4 | `k8s_instance_secrets` | `*_instances` | Seals the instance secrets with `seal-secrets.sh`, asks for the missing external ones, copies `secrets.yaml` back to the local `Deploiment` checkout |
 | 5 | `github_runner` | `*_argocd` with `github_runner_enabled` | Ephemeral GitHub Actions runner of `Deploiment` and a least-privilege kubeconfig on staging, so the Promote workflow runs `verify.sh` before prod (MAIR-346) |
@@ -74,7 +74,8 @@ Each environment follows its own `Deploiment` branch, set by
 `deploiment_env_revisions` in `inventory/group_vars/all.yml` (`dev` →
 `deploiment_repo_branch`, `staging` → `staging`, `prod` → `prod`). The
 `Promote` workflow of `Deploiment` moves those branches (main → staging →
-prod, fast-forward only). That map is the single source for both layers:
+prod; staging merges instead of fast-forwarding when argocd-image-updater
+committed tags on it, MAIR-444). That map is the single source for both layers:
 
 - the **instance chart**: the instances ApplicationSet rendered by phase 2
   (`roles/k8s_argocd/templates/instances-appset.yaml.j2`) gives each
@@ -106,8 +107,8 @@ its bootstrap Applications at a path that does not exist yet. Order:
 
 1. Merge the `Deploiment` change on `main` (dev's bootstrap is unchanged: it
    follows `main` either way).
-2. Promote `Deploiment` to `staging` (Promote workflow, `target=staging`) and
-   sync staging in Argo CD.
+2. Promote `Deploiment` to `staging` (Promote workflow, `target=staging`);
+   staging syncs by itself (`deploiment_auto_sync_envs`, MAIR-444).
 3. Here: annotate `dev` and `staging` and set up the runner (the default
    `deploiment_revision_annotated_envs`), with the GitHub App variables of
    the next section:
@@ -137,7 +138,7 @@ and never opens anything:
 | Ephemeral | One just-in-time (JIT) registration per job: `gh-runner.service` registers, runs one job, exits and systemd restarts it. Before every job the runner directory is re-copied from the pinned release and its `HOME` (`/var/lib/gh-runner/home`) emptied, so nothing a job writes survives |
 | User | `gh-runner`, non-root system user, no login shell, cannot write to `/home/gh-runner`. The systemd unit is sandboxed (`ProtectSystem=strict`, `NoNewPrivileges`, `PrivateTmp`, no access to `/root` nor `/etc/gh-runner`) |
 | Network | Outbound HTTPS to GitHub only: no inbound port, no firewall or WireGuard change. The unit's `IPAddressDeny` blocks the tunnel subnet and this machine's pod and Service networks (Argo CD), except the WireGuard IPs of the verified instances |
-| Instance access | For each env of `github_runner_verify_envs` (default `staging`): ServiceAccount `mairie360-ci/verify-runner` with exactly the rules listed at the top of `Deploiment/scripts/verify.sh` (no Secret read, no exec; mapped to its steps in `roles/github_runner/templates/verify-rbac.yaml.j2`), plus a `ValidatingAdmissionPolicy` that only lets it create, attach to and delete `verify-probe-*` pods of image `curlimages/curl:8.10.1` with no volume, env nor token. Kubeconfig: `/home/gh-runner/.kube/instance-<env>.yaml` (root:gh-runner, 0440, one context `<env>`, current). The admin kubeconfigs of `/root/.kube/` are never readable by the runner |
+| Instance access | For each env of `github_runner_verify_envs` (default `staging`): ServiceAccount `mairie360-ci/verify-runner` with exactly the rules listed at the top of `Deploiment/scripts/verify.sh` (no Secret read, no exec; mapped to its steps in `roles/github_runner/templates/verify-rbac.yaml.j2`), plus a `ValidatingAdmissionPolicy` that only lets it create, attach to and delete `verify-probe-*` pods of image `curlimages/curl:8.10.1` with no volume, env nor token, labelled at most `app.kubernetes.io/component` = `bff` or `keycloak-test` (`github_runner_probe_components`; never `api`, which would reach Postgres). With no Secret read, `verify.sh` skips its two plaintext checks there (argon2id `ADMIN_PASSWORD`, URL-safe passwords); run as root they still apply. Kubeconfig: `/home/gh-runner/.kube/instance-<env>.yaml` (root:gh-runner, 0440, one context `<env>`, current). The admin kubeconfigs of `/root/.kube/` are never readable by the runner |
 | Version | `github_runner_version` + `github_runner_sha256` in `inventory/group_vars/all.yml`. GitHub stops sending jobs to a runner more than 30 days behind: bump it at least monthly |
 
 **Registration credential.** A GitHub App installed on `mairie360/Deploiment`
@@ -171,10 +172,42 @@ hijacked job could do, but they are a second line, not the first.
 when `gh-runner.service` is not active. On the machine:
 `journalctl -u gh-runner` (one "registered ephemeral runner" line per job).
 
+`tests/github_runner_test.yml` (CI job `github-runner`) renders the
+annotation, the runner's RBAC, admission policy and systemd unit on
+localhost and pins the rules above.
+
 ## Usage
 
 Clone `Deploiment` next to this repo (`Devops/ansible` + `Devops/Deploiment`):
 phase 4 writes each instance's `secrets.yaml` there.
+
+The real inventory is local (MAIR-708): this repository is public and must not
+publish the machines' addresses, so `inventory/hosts.yml` is gitignored. Create it
+from the template and fill in the real addresses (ask the team for the current
+file; it will move to a private source later):
+
+```bash
+cp inventory/hosts.example.yml inventory/hosts.yml
+```
+
+Existing checkout that still tracks `inventory/hosts.yml`: pulling the MAIR-708 commit
+deletes it. Save it first, then put it back (it is ignored by git afterwards):
+
+```bash
+cp inventory/hosts.yml /tmp/hosts.yml && git pull && mv /tmp/hosts.yml inventory/hosts.yml
+# Already pulled: restore it from the history
+git show "$(git log -1 --format=%H --diff-filter=D -- inventory/hosts.yml)^:inventory/hosts.yml" > inventory/hosts.yml
+```
+
+`python3 tests/check_no_public_ip.py` (also run by CI) fails when a tracked file
+holds a public IPv4 address; private and documentation ranges are allowed.
+CI also runs Gitleaks on every new commit (MAIR-677): a token, a private key
+or a long random password fails the check of the push or pull request. Short
+or dictionary passwords (`db_password: hunter2`) are not detected, so never
+rely on it: encrypt every secret with Ansible Vault (its ciphertext is
+allowed). If a secret was pushed, rotate it first. The repository has no
+`.gitleaks.toml` or `.gitleaksignore` and CI fails if one appears: either
+would let a commit silence the scan.
 
 ```bash
 ansible-galaxy collection install -r requirements.yml
@@ -219,24 +252,55 @@ unblock it, on the Argo CD machine (the kubeconfig is written by phase 3, with
 sudo KUBECONFIG=/root/.kube/argocd-cli.yaml argocd app terminate-op <env> --core
 ```
 
-Migrating a group whose Applications are still multi-source (every group
-provisioned before MAIR-173): re-run `site.yml` on the whole group. The
-ApplicationSet is per group, so all its instances switch at once (there is no
-"dev first" here). Phase 2 carries the image tags written by
-argocd-image-updater over to the new layout, then:
+A group whose Applications are still multi-source (provisioned before
+MAIR-173) switches to the single-source layout on the next `site.yml` run,
+all its instances at once (the ApplicationSet is per group). Check it with:
 
 ```bash
-# On the Argo CD machine: every instance Application is single-source...
+# On the Argo CD machine: every instance Application is single-source
 sudo kubectl -n argocd get applications.argoproj.io \
   -o custom-columns='NAME:.metadata.name,SOURCE:.spec.source.path,SOURCES:.spec.sources[*].ref'
-# ...and still carries its image tags (not the values.yaml ones)
-sudo kubectl -n argocd get applications.argoproj.io <env> -o jsonpath='{.spec.source.helm.parameters}'
 
 ansible-playbook playbooks/verify.yml
 ```
 
 Acceptance test: push a commit to `Deploiment` `main` while an instance is
 syncing, and check that it converges on the new commit on its own.
+
+## Image tags (MAIR-186, MAIR-444)
+
+What runs on an instance is always what `Deploiment` says: argocd-image-updater
+never writes into the Applications any more, and the instances ApplicationSet
+no longer preserves their Helm parameters, so a parameter set by hand is
+reverted and shown as drift.
+
+| Environment | Who moves the image tags | Where |
+|---|---|---|
+| dev | argocd-image-updater, newest `dev-<sha>` | a `chore(deps)` PR on `main` editing `clusters/<org>/instances/dev/values.yaml`, auto-merged by Deploiment's `image-updater-automerge` workflow once CI passes |
+| staging | argocd-image-updater, newest `staging-<sha>` | a commit on the `staging` branch into `clusters/<org>/instances/staging/images.yaml` (read after `values.yaml`); staging syncs by itself |
+| prod, clients | nobody: no `ImageUpdater` | the tags pinned in `clusters/_base/prod.yaml`, moved by a reviewed commit and a `Promote` |
+
+Every service is tracked, `database` and `liquibase-migrations` included. The
+policies live in `image_updater_policies` (`roles/k8s_argocd/defaults/main.yml`).
+The write-back needs a fine-grained token on `mairie360/Deploiment` (contents
+and pull requests read/write): `DEPLOIMENT_GIT_USER` / `DEPLOIMENT_GIT_TOKEN`,
+else the `argocd/deploiment-git-creds` already on the Argo CD machine, else a
+prompt.
+
+**Switching a group that ran the former image-updater.** Phase 2 deletes the
+`ImageUpdater` of every environment no longer followed (prod), then lists the
+tags it left in the Applications' Helm parameters and **stops** while any is
+left: dropping them silently would roll the instance back to its pinned tags.
+
+```bash
+# 1. First run: the play stops and prints, per Application, the tags written outside git.
+ansible-playbook playbooks/site.yml --limit mairie360_argocd:mairie360_instances
+# 2. Pin the prod tags to keep in Deploiment clusters/_base/prod.yaml (PR + Promote).
+#    dev and staging need nothing: the git write-back commits the newest tags on its next pass.
+# 3. Remove the leftover parameters; the ApplicationSet then follows git only.
+ansible-playbook playbooks/site.yml --limit mairie360_argocd:mairie360_instances \
+  -e image_updater_clear_parameters=true
+```
 
 ## Secrets
 
@@ -245,14 +309,20 @@ Phase 4 (`playbooks/secrets.yml`, also imported by `site.yml`) runs
 one that reaches the instance API server, through the tunnel. For each instance:
 
 - it waits for the sealed-secrets controller Argo CD deploys on it;
-- generated secrets (`JWT_SECRET`, Postgres, Redis ACL, `RESTIC_PASSWORD`) are
-  generated on the first run, then kept. Nothing is ever rotated here;
+- generated secrets (`JWT_SECRET`, Postgres, Redis ACL) are generated by
+  `seal-secrets.sh` on the first run, then kept. Nothing is ever rotated here;
+- `RESTIC_PASSWORD` and the admin account's first `ADMIN_PASSWORD` are
+  resolved by the role itself and **backed up on the operator's machine**
+  (MAIR-599), see [Backups of the generated secrets](#backups-of-the-generated-secrets);
 - external secrets are resolved in this order: `instance_secrets[<host>]`
   (e.g. `-e @secrets.yml --ask-vault-pass`, see
   `roles/k8s_instance_secrets/defaults/main.yml`), environment variables
   (`RESEND_API_KEY`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `AWS_ACCESS_KEY_ID`,
   `AWS_SECRET_ACCESS_KEY`, `COCKPIT_TOKEN`), the value already on the instance,
-  otherwise **a prompt** (empty to skip). The backup bucket keys are only asked
+  otherwise **a prompt** (empty to skip). The Resend key is **mandatory at the
+  first sealing** of an instance (no `<env>-keycloak-secret` on it yet, MAIR-599):
+  Keycloak imports its SMTP settings once, an empty key would leave its e-mails
+  broken for good, so the play fails instead. The backup bucket keys are only asked
   when `backup.enabled` is true in the instance values, and the Scaleway
   Cockpit token (`COCKPIT_TOKEN`, MAIR-131, read by the OpenTelemetry
   Collector) when `global.observability.enabled` is;
@@ -260,17 +330,58 @@ one that reaches the instance API server, through the tunnel. For each instance:
   / `ADMIN_EMAIL`, MAIR-170) is resolved the same way, but is **mandatory**:
   prompted in clear (not hidden), and the play **fails** if it is still empty
   — no instance should keep Database's public template admin account by
-  accident. `seal-secrets.sh` generates the matching `ADMIN_PASSWORD` itself
-  and keeps it on later runs; this role cannot yet read that value back to
-  deposit it on the workstation (tracked in `roles/k8s_instance_secrets/tasks/main.yml`);
+  accident. The matching first `ADMIN_PASSWORD` is generated by the role (see
+  below);
 - GHCR credentials come from `GHCR_USER` / `GHCR_TOKEN`, else from
-  `argocd/ghcr-secret` (phase 2 prompts for it once per group);
+  `argocd/ghcr-secret` (phase 2 prompts for it once per group); the Deploiment
+  write-back token the same way, from `DEPLOIMENT_GIT_USER` /
+  `DEPLOIMENT_GIT_TOKEN`, else `argocd/deploiment-git-creds`;
 - `secrets.yaml` is copied into the local `Deploiment` checkout, and the
   instance sealing key into `~/.mairie360/sealing-keys/<org>-<env>.yaml`.
   Store that key in the team vault: without it, a reinstall makes every
   committed `secrets.yaml` of the instance undecryptable.
 
-In CI, pass `-e secrets_prompt=false`: missing secrets are then only reported.
+In CI, pass `-e secrets_prompt=false`: missing secrets are then only reported
+(except the admin e-mail, and the Resend key at the first sealing, which fail).
+
+### Backups of the generated secrets
+
+Two generated values exist nowhere but on the instance, so the role keeps a copy
+on the operator's machine, in `operator_backup_dir` (default `~/.mairie360`,
+mode 700, files mode 600, outside any git repository):
+
+| File | Holds | Lost without it |
+| --- | --- | --- |
+| `restic-<org>-<env>.txt` | `RESTIC_PASSWORD` of the backup bucket | every backup, if the instance or its sealing key is lost |
+| `admin-<org>-<env>.txt` | plaintext first password of the town hall admin account (MAIR-170) | the first login: the instance only holds its argon2id hash (MAIR-414) |
+| `sealing-keys/<org>-<env>.yaml` | the instance sealing key | every committed `secrets.yaml`, after a reinstall |
+
+Store the three in the team vault. On every run, per value: what is already
+sealed on the instance wins, then the backup file, and only then a new hex value
+is generated. A value sealed on the instance is **never** replaced (a new
+`RESTIC_PASSWORD` would make the bucket unreadable), not even by
+`seal_extra_args=--rotate`. The role passes both values to `seal-secrets.sh`
+(`RESTIC_PASSWORD`, `ADMIN_PASSWORD`) after writing the backup files, so the
+sealed value is always the backed-up one, also on a re-run before the first
+`secrets.yaml` is pushed. For the admin account, `seal-secrets.sh` seals only the
+hash and writes nothing on the Argo CD machine; once the instance holds the
+hash, the role passes the hash back unchanged and leaves the backup file alone.
+When the backup file disagrees with the instance (restic), the file is rewritten
+with the instance's value and the old content kept next to it
+(`<file>.<pid>.<date>~`).
+
+Runs before MAIR-599 let `seal-secrets.sh` write the admin plaintext on the
+Argo CD machine (`/root/.mairie360/admin-<org>-<env>.txt`, older ones with a date
+suffix). The role now fetches those files into `operator_backup_dir` (with a
+`.from-<argocd host>` suffix when a local file of that name already exists) and
+deletes them from the Argo CD machine.
+
+Rollout on an existing instance: run `playbooks/secrets.yml --limit <host>` once.
+It changes no sealed value: `RESTIC_PASSWORD` and the admin hash are read back
+from the instance and sealed again as they are; it only creates the backup files
+and moves the admin files off the Argo CD machine. Commit the resulting
+`secrets.yaml` as usual (its ciphertext changes on every run, its values do not),
+then store the files in the team vault.
 
 ```bash
 # Change a single instance's Resend key
@@ -296,14 +407,36 @@ delete `argocd-initial-admin-secret`. Run logs (`logs/`, `*.log`) are
 git-ignored. Before committing a role change, run the static check:
 
 ```bash
-python3 tests/check_no_log.py   # fails on a secret-handling task without no_log
+python3 tests/check_no_log.py       # fails on a secret-handling task without no_log
+python3 tests/check_gdpr_config.py  # fails when Hubble metrics are labelled with IP addresses
+ansible-playbook tests/gdpr_gaps_test.yml   # the GDPR gaps of verify.yml, on localhost
+ansible-playbook tests/image_updater_test.yml   # no ImageUpdater in prod, git write-back for dev/staging
+ansible-playbook tests/seal_passwords_test.yml  # MAIR-599: generated secrets resolution, Resend key at the first sealing
+python3 tests/check_image_updater_services.py ../Deploiment  # image_updater_services = services deployed by Deploiment
+ansible-lint                                    # pre-existing violations: .ansible-lint, .ansible-lint-ignore
+bash tests/mair_677_secret_scan_test.sh   # Gitleaks blocks tokens and keys, not vault ciphertext (docker)
 ```
+
+## GDPR checks of the machines (MAIR-293)
+
+`playbooks/verify.yml` ends with a read-only GDPR play on every machine (Argo CD and instances).
+It collects auditd, the effective sshd settings (`sshd -T`: no password, no root), the UFW rule of
+port 22 (open only on `wg0`), `k3s secrets-encrypt status`, unattended-upgrades, an encrypted
+(`crypt`) volume on the machines marked `hosted_at_mairie: true`, journald's `MaxRetentionSec`
+against the `technical_logs` period of Devops/Deploiment `compliance/<org_id>/retention.yaml`, and
+the authorized SSH keys, WireGuard peers and Argo CD accounts against `compliance/<org_id>/access.yaml`
+(read from the Deploiment checkout of the Argo CD machine; an empty `access.yaml` is reported as
+"no decision"). Each failed check is a gap (`playbooks/templates/gdpr_gaps.j2`); the play fails on any
+gap not listed in `gdpr_allowed_gaps` (group_vars, `id: reason`). The role `k8s_node` installs auditd
+and bounds journald to `technical_logs_retention` (1 year by default), and the Hubble metrics no
+longer carry IP addresses.
 
 ## Ajouter un client
 
 Trois fichiers, aucun playbook ni rôle à toucher :
 
-1. `inventory/hosts.yml` — les groupes `client_x_argocd` et `client_x_instances`
+1. `inventory/hosts.yml` (local, gitignored) — les groupes `client_x_argocd` et `client_x_instances` ;
+   ajouter aussi le modèle dans `inventory/hosts.example.yml` avec des adresses de documentation
 2. `inventory/group_vars/client_x_argocd.yml` et `inventory/group_vars/client_x_instances.yml` —
    une ligne : `org_id: client-x`
 3. dans `Deploiment` : `clusters/client-x/instances/prod/values.yaml`

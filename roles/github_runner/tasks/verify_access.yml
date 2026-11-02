@@ -63,7 +63,7 @@
 
 # Self-test of the policy with server-side dry runs (admission runs, nothing
 # is created): a verify.sh probe is accepted, anything else is refused.
-- name: "The runner may create a verify.sh probe pod ({{ github_runner_env }})"
+- name: "The runner may create a verify.sh probe pod ({{ github_runner_env }}, {{ item }})"
   ansible.builtin.command:
     argv:
       - kubectl
@@ -72,7 +72,7 @@
       - run
       - "{{ github_runner_probe_prefix }}allow"
       - "--image={{ github_runner_probe_image }}"
-      - --labels=app.kubernetes.io/component=bff
+      - "--labels=app.kubernetes.io/component={{ item }}"
       - --restart=Never
       - '--overrides={"apiVersion":"v1","spec":{"automountServiceAccountToken":false}}'
       - --dry-run=server
@@ -80,6 +80,7 @@
       - curl
       - -sf
       - "http://{{ github_runner_env }}-core-api:3000/health"
+  loop: "{{ github_runner_probe_components }}"
   register: github_runner_probe_allowed
   changed_when: false
 

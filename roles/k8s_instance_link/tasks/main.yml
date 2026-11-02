@@ -201,9 +201,7 @@
   delegate_to: "{{ argocd_host }}"
   environment:
     KUBECONFIG: /etc/rancher/k3s/k3s.yaml
-    REVISION: >-
-      {{ (deploiment_env_revisions[env_name] | default(deploiment_repo_branch))
-         if env_name in deploiment_revision_annotated_envs else '' }}
+    REVISION: "{{ deploiment_bootstrap_revision }}"
   register: label_result
   # "secret/<name> not labeled" when the labels were already there.
   changed_when: label_result.stdout is search('(?m)^secret/\\S+ (labeled|annotated)$')

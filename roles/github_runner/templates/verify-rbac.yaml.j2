@@ -10,7 +10,7 @@
 #
 #   namespace mairie360-{{ github_runner_env }}
 #     ""           pods            get list watch      steps 1, 2; kubectl run waits for its pod
-#     ""           pods            create delete       steps 6, 8, 9, 12 (probe pods, --rm); restricted
+#     ""           pods            create delete       steps 6, 8, 9, 12, 12b (probe pods, --rm); restricted
 #                                                      to the probe pods by the admission policy below
 #     ""           pods/attach     create              kubectl run -i (probe pods only, policy below)
 #     ""           pods/log        get                 kubectl run -i falls back to the logs of a probe
@@ -144,8 +144,9 @@ subjects:
 #     container of image {{ github_runner_probe_image }} with no command override,
 #     no env / envFrom, no volume, no service account token
 #     (automountServiceAccountToken: false), no host namespace, not
-#     privileged, and no label but `run` and `app.kubernetes.io/component=bff`
-#     (the only component verify.sh impersonates);
+#     privileged, and no label but `run` and `app.kubernetes.io/component`
+#     with one of the values verify.sh impersonates
+#     ({{ github_runner_probe_components | join(', ') }});
 #   - delete and attach to those pods only.
 # `pods create` would otherwise let it start a pod mounting any Secret of the
 # namespace. The Deploiment workflow runs on a runner of a public
@@ -191,7 +192,8 @@ spec:
          && !(has(object.spec.hostPID) && object.spec.hostPID)
          && !(has(object.spec.hostIPC) && object.spec.hostIPC)
          && (!has(object.metadata.labels) || object.metadata.labels.all(k,
-              k == 'run' || (k == 'app.kubernetes.io/component' && object.metadata.labels[k] == 'bff'))))
+              k == 'run' || (k == 'app.kubernetes.io/component'
+                             && object.metadata.labels[k] in {{ github_runner_probe_components | to_json }}))))
       message: >-
         verify-runner may only create the scripts/verify.sh probe pods
         ({{ github_runner_probe_prefix }}*, {{ github_runner_probe_image }}, no volume, no env, no token).

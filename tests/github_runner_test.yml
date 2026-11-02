@@ -1,0 +1,107 @@
+---
+# Test of the MAIR-346 templates and variables, on localhost, no machine
+# touched:
+#
+#   ansible-playbook tests/github_runner_test.yml
+#
+# Checks that:
+#   - the mairie360.fr/revision annotation follows deploiment_env_revisions
+#     (dev -> main, staging -> staging) for the annotated environments only,
+#     the same map the instances ApplicationSet renders (no second copy);
+#   - the runner's ServiceAccount (verify-rbac.yaml.j2) reads no Secret, may
+#     not exec, only reads the four instance SealedSecrets, and its probe pods
+#     may only impersonate a BFF or Keycloak's test client, never an API;
+#   - the runner's systemd unit opens no network path to the tunnel but the
+#     verified instance.
+- name: Promotion runner and bootstrap revision
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    template_vars:
+      org_group: test
+      org_id: mairie360
+      github_runner_env: staging
+      github_runner_allowed_ips: ["10.10.0.3"]
+  tasks:
+    - name: Declare a group with dev, staging and prod instances
+      ansible.builtin.add_host:
+        name: "test-{{ item }}"
+        groups: [test_instances]
+        env_name: "{{ item }}"
+      loop: [dev, staging, prod]
+
+    - name: Load the role defaults and the shared group variables
+      ansible.builtin.include_vars:
+        file: "{{ item }}"
+      loop:
+        - ../roles/k8s_argocd/defaults/main.yml
+        - ../roles/github_runner/defaults/main.yml
+        - ../inventory/group_vars/all.yml
+
+    - name: The annotation follows deploiment_env_revisions for the annotated environments only
+      ansible.builtin.assert:
+        that: revision == item.want
+        fail_msg: "{{ item.env }}: expected '{{ item.want }}', got '{{ revision }}'"
+      vars:
+        env_name: "{{ item.env }}"
+        revision: "{{ deploiment_bootstrap_revision }}"
+      loop:
+        - { env: dev, want: main }
+        - { env: staging, want: staging }
+        # prod is annotated only after Deploiment's bootstrap/addons/ reached
+        # the prod branch (README, rollout of MAIR-346).
+        - { env: prod, want: "" }
+        - { env: client-unknown, want: "" }
+
+    - name: An annotated environment follows the same branch as its instance Application
+      ansible.builtin.assert:
+        that:
+          - "(item | to_json ~ ' ' ~ deploiment_env_revisions[item] | to_json) in appset_revision"
+        fail_msg: "{{ item }} not rendered as {{ deploiment_env_revisions[item] }} in {{ appset_revision }}"
+      vars:
+        appset_revision: >-
+          {{ (lookup('ansible.builtin.template', '../roles/k8s_argocd/templates/instances-appset.yaml.j2',
+              template_vars=template_vars) | ansible.builtin.from_yaml).spec.template.spec.source.targetRevision }}
+      loop: "{{ deploiment_revision_annotated_envs }}"
+
+    - name: Render the runner's RBAC and systemd unit
+      ansible.builtin.set_fact:
+        rbac: "{{ lookup('ansible.builtin.template', '../roles/github_runner/templates/verify-rbac.yaml.j2', template_vars=template_vars) | ansible.builtin.from_yaml_all | select | list }}"
+        unit: "{{ lookup('ansible.builtin.template', '../roles/github_runner/templates/gh-runner.service.j2', template_vars=template_vars) }}"
+
+    - name: Collect the rules of the runner's Roles
+      ansible.builtin.set_fact:
+        rules: "{{ rbac | selectattr('kind', 'equalto', 'Role') | map(attribute='rules') | flatten }}"
+        policy: "{{ (rbac | selectattr('kind', 'equalto', 'ValidatingAdmissionPolicy') | first).spec.validations | map(attribute='expression') | join(' ') }}"
+
+    - name: No Secret, no exec, no write but the probe pods
+      ansible.builtin.assert:
+        that:
+          - rules | map(attribute='resources') | flatten | select('search', '^(secrets|pods/exec|\\*)$') | list == []
+          - rules | map(attribute='verbs') | flatten | select('in', ['update', 'patch', 'escalate', 'bind', 'impersonate', '*']) | list == []
+          - (rules | selectattr('verbs', 'contains', 'create') | map(attribute='resources') | flatten | sort) == ['pods', 'pods/attach']
+          - (rules | selectattr('resources', 'contains', 'sealedsecrets') | first).resourceNames | sort ==
+            ['staging-app-secrets', 'staging-database-secret', 'staging-keycloak-secret', 'staging-redis']
+          - rbac | selectattr('kind', 'in', ['ClusterRole', 'ClusterRoleBinding']) | list == []
+        fail_msg: "{{ rules | to_json }}"
+
+    - name: Probe pods may impersonate a BFF or Keycloak's test client, never an API
+      ansible.builtin.assert:
+        that:
+          - github_runner_probe_components | sort == ['bff', 'keycloak-test']
+          - "'[\"bff\",\"keycloak-test\"]' in policy | replace(' ', '')"
+          - "\"'api'\" not in policy"
+          - "'automountServiceAccountToken' in policy"
+          - "'verify-probe-keycloak-bff' in (rules | selectattr('resources', 'contains', 'pods/log') | first).resourceNames"
+        fail_msg: "{{ policy }}"
+
+    - name: The runner reaches no tunnel address but the verified instance
+      ansible.builtin.assert:
+        that:
+          - unit is search('(?m)^IPAddressDeny=' ~ (wg_subnet ~ ' ' ~ k3s_cluster_cidr ~ ' ' ~ k3s_service_cidr) | regex_escape ~ '$')
+          - unit is search('(?m)^IPAddressAllow=10\\.10\\.0\\.3$')
+          - unit is search('(?m)^User=gh-runner$')
+          - unit is search('(?m)^NoNewPrivileges=true$')
+          - unit is search('(?m)^InaccessiblePaths=-/root -/etc/gh-runner$')
+        fail_msg: "{{ unit }}"
