@@ -24,7 +24,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - name: Run Gitleaks on the new commits
-        uses: mairie360/CICD/actions/security/gitleaks@v4.12.1
+        uses: mairie360/CICD/actions/security/gitleaks@v5.2.1
       - name: Check the scan rules (blocks tokens and keys, lets vault ciphertext through)
         run: bash tests/mair_677_secret_scan_test.sh
 

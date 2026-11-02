@@ -45,9 +45,10 @@ scan() { # scan <expected: clean|leak> <label> <file> <content>
   git -C "$repo" -c user.name=t -c user.email=t@t add -A
   git -C "$repo" -c user.name=t -c user.email=t@t commit -qm test
   docker run --rm --user "$(id -u):$(id -g)" -v "$repo:/repo" -w /repo "$IMAGE" \
-    git /repo --redact --no-banner --exit-code 1 >/dev/null 2>&1
+    git /repo --redact --no-banner --exit-code 42 >/dev/null 2>&1
   local rc=$? got
-  if [ "$rc" -eq 0 ]; then got=clean; elif [ "$rc" -eq 1 ]; then got=leak; else got="error($rc)"; fi
+  # 42 = findings; Gitleaks also exits 1 on a scan error, which must not pass as a leak.
+  if [ "$rc" -eq 0 ]; then got=clean; elif [ "$rc" -eq 42 ]; then got=leak; else got="error($rc)"; fi
   if [ "$got" = "$1" ]; then echo "  OK    $1: $2"; else echo "  FAIL  expected $1, got $got: $2"; FAILED=1; fi
 }
 
