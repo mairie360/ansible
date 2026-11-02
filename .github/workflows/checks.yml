@@ -3,8 +3,8 @@ name: Checks
 
 on:
   pull_request:
+  # Every branch: a public address pushed before any pull request exists is reported too.
   push:
-    branches: [main]
 
 permissions:
   contents: read

@@ -81,6 +81,15 @@ file; it will move to a private source later):
 cp inventory/hosts.example.yml inventory/hosts.yml
 ```
 
+Existing checkout that still tracks `inventory/hosts.yml`: pulling the MAIR-708 commit
+deletes it. Save it first, then put it back (it is ignored by git afterwards):
+
+```bash
+cp inventory/hosts.yml /tmp/hosts.yml && git pull && mv /tmp/hosts.yml inventory/hosts.yml
+# Already pulled: restore it from the history
+git show "$(git log -1 --format=%H --diff-filter=D -- inventory/hosts.yml)^:inventory/hosts.yml" > inventory/hosts.yml
+```
+
 `python3 tests/check_no_public_ip.py` (also run by CI) fails when a tracked file
 holds a public IPv4 address; private and documentation ranges are allowed.
 
