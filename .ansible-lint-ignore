@@ -1,0 +1,10 @@
+# Violations already on main when ansible-lint was added to CI (MAIR-599),
+# per file and rule. Fix them when touching these files and drop the line.
+roles/k8s_argocd/defaults/main.yml yaml[commas]
+roles/k8s_argocd/tasks/main.yml yaml[line-length]
+roles/k8s_instance_secrets/tasks/main.yml yaml[line-length]
+roles/k8s_node/tasks/cilium.yml risky-shell-pipe
+roles/k8s_node/tasks/main.yml no-changed-when
+roles/k8s_node/tasks/main.yml no-handler
+tests/gdpr_gaps_test.yml yaml[line-length]
+tests/image_updater_test.yml yaml[line-length]
