@@ -92,6 +92,13 @@ git show "$(git log -1 --format=%H --diff-filter=D -- inventory/hosts.yml)^:inve
 
 `python3 tests/check_no_public_ip.py` (also run by CI) fails when a tracked file
 holds a public IPv4 address; private and documentation ranges are allowed.
+CI also runs Gitleaks on every new commit (MAIR-677): a token, a private key
+or a long random password fails the check of the push or pull request. Short
+or dictionary passwords (`db_password: hunter2`) are not detected, so never
+rely on it: encrypt every secret with Ansible Vault (its ciphertext is
+allowed). If a secret was pushed, rotate it first. The repository has no
+`.gitleaks.toml` or `.gitleaksignore` and CI fails if one appears: either
+would let a commit silence the scan.
 
 ```bash
 ansible-galaxy collection install -r requirements.yml
@@ -298,6 +305,7 @@ ansible-playbook tests/image_updater_test.yml   # no ImageUpdater in prod, git w
 ansible-playbook tests/seal_passwords_test.yml  # MAIR-599: generated secrets resolution, Resend key at the first sealing
 python3 tests/check_image_updater_services.py ../Deploiment  # image_updater_services = services deployed by Deploiment
 ansible-lint                                    # pre-existing violations: .ansible-lint, .ansible-lint-ignore
+bash tests/mair_677_secret_scan_test.sh   # Gitleaks blocks tokens and keys, not vault ciphertext (docker)
 ```
 
 ## GDPR checks of the machines (MAIR-293)
