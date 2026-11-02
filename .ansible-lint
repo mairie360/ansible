@@ -1,0 +1,18 @@
+---
+# ansible-lint configuration (MAIR-599), run by .github/workflows/checks.yml.
+#
+# Skipped for good: var-naming[no-role-prefix]. The roles share facts and
+# group variables on purpose (argocd_host, org_id, env_name, instance_ns...)
+# and the convention of this repository is unprefixed names; renaming them
+# would touch every role and the inventory for no behaviour change.
+#
+# The other violations already on main when ansible-lint was added are
+# listed, per file and rule, in .ansible-lint-ignore (no reformatting of the
+# whole repository in that change). Any new violation fails the job; fix
+# entries of .ansible-lint-ignore when touching those files and remove them.
+profile: production
+offline: true
+skip_list:
+  - var-naming[no-role-prefix]
+exclude_paths:
+  - .github/

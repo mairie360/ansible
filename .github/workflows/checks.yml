@@ -1,5 +1,6 @@
 # Static checks of the repository: no public IP address in a tracked file (MAIR-708),
-# image-updater templates (MAIR-186, MAIR-444).
+# image-updater templates (MAIR-186, MAIR-444), ansible-lint, no secret logged, the
+# instance secrets rules and the followed images against Deploiment (MAIR-599).
 name: Checks
 
 on:
@@ -27,3 +28,69 @@ jobs:
         run: pipx install ansible-core==2.20.7
       - name: Render the image-updater templates
         run: ansible-playbook tests/image_updater_test.yml
+
+  ansible-lint:
+    # MAIR-599. Pre-existing violations: .ansible-lint / .ansible-lint-ignore.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install ansible-core and ansible-lint
+        # Outside the checkout, so that ansible-lint does not scan the venv.
+        run: |
+          python3 -m venv "$RUNNER_TEMP/lint"
+          "$RUNNER_TEMP/lint/bin/pip" install ansible-core==2.20.7 ansible-lint==26.9.0
+          echo "$RUNNER_TEMP/lint/bin" >> "$GITHUB_PATH"
+      - name: Install the collections
+        run: ansible-galaxy collection install -r requirements.yml
+      - name: Lint
+        run: ansible-lint
+
+  no-log:
+    # MAIR-599: tasks handling secrets set no_log.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install PyYAML
+        run: |
+          python3 -m venv "$RUNNER_TEMP/py"
+          "$RUNNER_TEMP/py/bin/pip" install pyyaml==6.0.3
+      - name: No secret logged
+        run: '"$RUNNER_TEMP/py/bin/python" tests/check_no_log.py'
+
+  instance-secrets:
+    # MAIR-599: RESTIC_PASSWORD / ADMIN_PASSWORD resolution and backup, Resend key
+    # mandatory at the first sealing.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install ansible-core
+        run: pipx install ansible-core==2.20.7
+      - name: Test the generated secrets and the first sealing
+        run: ansible-playbook tests/seal_passwords_test.yml
+
+  image-updater-services:
+    # MAIR-599: image_updater_services follows exactly the services Deploiment deploys.
+    # The chart declares none (APIs|BFFs|Fronts.instances are empty): they are the keys of
+    # clusters/*/instances/*/values.yaml, so the check reads Deploiment's main (public
+    # repository) rather than the chart alone. A failure here after a Deploiment change
+    # means this repository has to follow it.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Check out Deploiment (main)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: mairie360/Deploiment
+          ref: main
+          path: deploiment
+          persist-credentials: false
+          sparse-checkout: |
+            clusters
+            charts/mairie360-stack/values.yaml
+          sparse-checkout-cone-mode: false
+      - name: Install PyYAML
+        run: |
+          python3 -m venv "$RUNNER_TEMP/py"
+          "$RUNNER_TEMP/py/bin/pip" install pyyaml==6.0.3
+      - name: Followed images match the deployed services
+        run: '"$RUNNER_TEMP/py/bin/python" tests/check_image_updater_services.py deploiment'
