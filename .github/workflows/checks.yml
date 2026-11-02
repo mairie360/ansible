@@ -12,8 +12,10 @@ permissions:
 
 jobs:
   secret-scan:
-    # MAIR-677: this repository is public. Gitleaks (default rules) blocks any
-    # new commit that adds a secret; Ansible Vault ciphertext is not reported.
+    # MAIR-677: this repository is public. Gitleaks (default rules) fails this
+    # job when a new commit adds a secret: it runs after the push, so it marks
+    # the push and blocks the pull request rather than refusing the push.
+    # Ansible Vault ciphertext is not reported.
     name: Secret scan (Gitleaks)
     runs-on: ubuntu-latest
     steps:

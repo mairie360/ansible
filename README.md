@@ -92,9 +92,11 @@ git show "$(git log -1 --format=%H --diff-filter=D -- inventory/hosts.yml)^:inve
 
 `python3 tests/check_no_public_ip.py` (also run by CI) fails when a tracked file
 holds a public IPv4 address; private and documentation ranges are allowed.
-CI also runs Gitleaks on every new commit (MAIR-677): a token, password or
-private key in a commit fails the push or pull request. Encrypt secrets with
-Ansible Vault (its ciphertext is allowed); if one was pushed, rotate it first.
+CI also runs Gitleaks on every new commit (MAIR-677): a token, a private key
+or a long random password fails the check of the push or pull request. Short
+or dictionary passwords (`db_password: hunter2`) are not detected, so never
+rely on it: encrypt every secret with Ansible Vault (its ciphertext is
+allowed). If a secret was pushed, rotate it first.
 
 ```bash
 ansible-galaxy collection install -r requirements.yml
