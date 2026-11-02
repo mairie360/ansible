@@ -72,6 +72,27 @@ remove it), same command, and revert the values.
 Clone `Deploiment` next to this repo (`Devops/ansible` + `Devops/Deploiment`):
 phase 4 writes each instance's `secrets.yaml` there.
 
+The real inventory is local (MAIR-708): this repository is public and must not
+publish the machines' addresses, so `inventory/hosts.yml` is gitignored. Create it
+from the template and fill in the real addresses (ask the team for the current
+file; it will move to a private source later):
+
+```bash
+cp inventory/hosts.example.yml inventory/hosts.yml
+```
+
+Existing checkout that still tracks `inventory/hosts.yml`: pulling the MAIR-708 commit
+deletes it. Save it first, then put it back (it is ignored by git afterwards):
+
+```bash
+cp inventory/hosts.yml /tmp/hosts.yml && git pull && mv /tmp/hosts.yml inventory/hosts.yml
+# Already pulled: restore it from the history
+git show "$(git log -1 --format=%H --diff-filter=D -- inventory/hosts.yml)^:inventory/hosts.yml" > inventory/hosts.yml
+```
+
+`python3 tests/check_no_public_ip.py` (also run by CI) fails when a tracked file
+holds a public IPv4 address; private and documentation ranges are allowed.
+
 ```bash
 ansible-galaxy collection install -r requirements.yml
 
@@ -215,7 +236,8 @@ longer carry IP addresses.
 
 Trois fichiers, aucun playbook ni rôle à toucher :
 
-1. `inventory/hosts.yml` — les groupes `client_x_argocd` et `client_x_instances`
+1. `inventory/hosts.yml` (local, gitignored) — les groupes `client_x_argocd` et `client_x_instances` ;
+   ajouter aussi le modèle dans `inventory/hosts.example.yml` avec des adresses de documentation
 2. `inventory/group_vars/client_x_argocd.yml` et `inventory/group_vars/client_x_instances.yml` —
    une ligne : `org_id: client-x`
 3. dans `Deploiment` : `clusters/client-x/instances/prod/values.yaml`

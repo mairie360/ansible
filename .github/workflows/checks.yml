@@ -1,0 +1,18 @@
+# Static checks of the repository (MAIR-708): no public IP address in a tracked file.
+name: Checks
+
+on:
+  pull_request:
+  # Every branch: a public address pushed before any pull request exists is reported too.
+  push:
+
+permissions:
+  contents: read
+
+jobs:
+  no-public-ip:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: No public IP in tracked files
+        run: python3 tests/check_no_public_ip.py

@@ -284,7 +284,7 @@
   changed_when: false
   failed_when: false
 
-# "v1.35.8+k3s1" -> "1.35.8.1": comparable with the `version` test.
+# "vX.Y.Z+k3sN" -> "X.Y.Z.N": comparable with the `version` test.
 - name: Compare the installed k3s version with the pin
   ansible.builtin.set_fact:
     k3s_installed_version: "{{ k3s_installed.stdout | default('') | regex_search('v[0-9]+[.][0-9]+[.][0-9]+[+]k3s[0-9]+') or '' }}"
