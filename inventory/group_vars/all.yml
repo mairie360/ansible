@@ -20,11 +20,14 @@ deploiment_env_revisions:
 
 # Environments whose Application syncs automatically (prune + selfHeal). The
 # others are synced by hand from Argo CD, which keeps a first deployment or a
-# promotion to staging/prod a deliberate act. Applies to every group: a client
-# group whose only environment is `prod` is synced by hand too. Re-run the
-# k8s_argocd role after changing it.
+# promotion to prod a deliberate act (a Promote to staging already is one).
+# Applies to every group: a client group whose only environment is `prod` is
+# synced by hand too. Re-run the k8s_argocd role after changing it.
 deploiment_auto_sync_envs:
   - dev
+  # MAIR-444: argocd-image-updater commits staging's tags on the staging
+  # branch; staging deploys them by itself, like dev.
+  - staging
 
 # Pinned versions. Bumps go through a PR, never through a playbook run that
 # would pick "the latest".
@@ -82,6 +85,15 @@ kubeseal_version: "0.30.0"
 # argocd/ghcr-secret already on the Argo CD machine, else prompted.
 ghcr_user: "{{ lookup('ansible.builtin.env', 'GHCR_USER') }}"
 ghcr_token: "{{ lookup('ansible.builtin.env', 'GHCR_TOKEN') }}"
+
+# Deploiment write credentials: argocd/deploiment-git-creds, used by
+# argocd-image-updater to commit the image tags of dev and staging (MAIR-444,
+# role k8s_argocd, image_updater_policies). A fine-grained token on
+# mairie360/Deploiment with contents and pull requests read/write. Same
+# resolution as GHCR: variables, else the secret already on the Argo CD
+# machine, else prompted.
+deploiment_git_user: "{{ lookup('ansible.builtin.env', 'DEPLOIMENT_GIT_USER') }}"
+deploiment_git_token: "{{ lookup('ansible.builtin.env', 'DEPLOIMENT_GIT_TOKEN') }}"
 
 # Ask interactively for every secret that is neither provided nor already on
 # the cluster. Set to false in CI (-e secrets_prompt=false): missing secrets

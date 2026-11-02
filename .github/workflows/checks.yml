@@ -1,4 +1,5 @@
-# Static checks of the repository (MAIR-708): no public IP address in a tracked file.
+# Static checks of the repository: no public IP address in a tracked file (MAIR-708),
+# image-updater templates (MAIR-186, MAIR-444).
 name: Checks
 
 on:
@@ -16,3 +17,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: No public IP in tracked files
         run: python3 tests/check_no_public_ip.py
+
+  image-updater:
+    # MAIR-186 / MAIR-444: prod gets no ImageUpdater, dev and staging write their tags to git.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install ansible-core
+        run: pipx install ansible-core==2.20.7
+      - name: Render the image-updater templates
+        run: ansible-playbook tests/image_updater_test.yml

@@ -16,12 +16,10 @@ spec:
   goTemplate: true
   goTemplateOptions: ["missingkey=error"]
 
-  # argocd-image-updater writes each image's new tag into
-  # spec.source.helm.parameters. Without this exception, the ApplicationSet
-  # controller would reset the list on its next reconciliation.
-  ignoreApplicationDifferences:
-    - jsonPointers:
-        - /spec/source/helm/parameters
+  # No ignoreApplicationDifferences (MAIR-186, MAIR-444): argocd-image-updater
+  # writes its tags to git, never into the Applications, so any Helm
+  # parameter set by hand on an Application is drift that the ApplicationSet
+  # reverts and Argo CD reports.
 
   generators:
     - git:
@@ -74,6 +72,9 @@ spec:
             # and settings of every prod. Missing for dev/staging.
             - '../../clusters/_base/{% raw %}{{ .path.basename }}{% endraw %}.yaml'
             - '../../{% raw %}{{ .path.path }}{% endraw %}/values.yaml'
+            # Image tags committed by argocd-image-updater on the staging
+            # branch (MAIR-444). Missing for the other environments.
+            - '../../{% raw %}{{ .path.path }}{% endraw %}/images.yaml'
             # Instance SealedSecret, produced by scripts/seal-secrets.sh.
             # Missing until it is generated: ignoreMissingValueFiles keeps
             # the sync working meanwhile.

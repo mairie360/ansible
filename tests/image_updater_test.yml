@@ -1,0 +1,110 @@
+---
+# Test of the image-updater templates of role k8s_argocd (MAIR-186, MAIR-444),
+# on localhost, no machine touched:
+#
+#   ansible-playbook tests/image_updater_test.yml
+#
+# Renders image-updaters.yaml.j2 and instances-appset.yaml.j2 for a group with
+# dev, staging and prod, and checks that:
+#   - prod gets no ImageUpdater, so its images are exactly what git pins;
+#   - dev and staging write their tags to git (dev: PR on main, staging: commit
+#     on the staging branch into images.yaml), never into the Applications;
+#   - database and liquibase-migrations are tracked like the other services;
+#   - the ApplicationSet reads images.yaml and no longer ignores the
+#     Applications' Helm parameters (drift is reverted and reported).
+- name: Image updater templates
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    # Passed as template_vars: the templates read them through
+    # `groups[org_group ~ '_instances'] | default([])`, which silently renders
+    # nothing when org_group is not visible to the lookup.
+    group_vars:
+      org_group: test
+      org_id: mairie360
+  tasks:
+    - name: Declare a group with dev, staging and prod instances
+      ansible.builtin.add_host:
+        name: "test-{{ item }}"
+        groups: [test_instances]
+        env_name: "{{ item }}"
+      loop: [dev, staging, prod]
+
+    - name: Load the role defaults and the shared group variables
+      ansible.builtin.include_vars:
+        file: "{{ item }}"
+      loop:
+        - ../roles/k8s_argocd/defaults/main.yml
+        - ../inventory/group_vars/all.yml
+
+    - name: Render the templates
+      ansible.builtin.set_fact:
+        updaters: "{{ lookup('ansible.builtin.template', '../roles/k8s_argocd/templates/image-updaters.yaml.j2', template_vars=group_vars) | ansible.builtin.from_yaml_all | select | list }}"
+        appset: "{{ lookup('ansible.builtin.template', '../roles/k8s_argocd/templates/instances-appset.yaml.j2', template_vars=group_vars) | ansible.builtin.from_yaml }}"
+
+    - name: Only dev and staging are followed, prod is not (MAIR-186)
+      ansible.builtin.assert:
+        that: updaters | map(attribute='metadata.name') | sort == ['dev', 'staging']
+        fail_msg: "ImageUpdaters rendered: {{ updaters | map(attribute='metadata.name') | list }}"
+
+    - name: Every ImageUpdater writes to git, never into the Application (MAIR-444)
+      ansible.builtin.assert:
+        that:
+          - item.spec.writeBackConfig.method == 'git:secret:argocd/deploiment-git-creds'
+          - item.spec.writeBackConfig.gitConfig.repository == deploiment_repo_url
+        fail_msg: "{{ item.metadata.name }}: {{ item.spec.writeBackConfig | to_json }}"
+      loop: "{{ updaters }}"
+      loop_control:
+        label: "{{ item.metadata.name }}"
+
+    - name: Dev opens pull requests on main against its values.yaml
+      ansible.builtin.assert:
+        that:
+          - cfg.branch == 'main'
+          - cfg.pullRequest.github == {}
+          - cfg.writeBackTarget == 'helmvalues:/clusters/mairie360/instances/dev/values.yaml'
+        fail_msg: "{{ cfg | to_json }}"
+      vars:
+        cfg: "{{ (updaters | selectattr('metadata.name', 'equalto', 'dev') | first).spec.writeBackConfig.gitConfig }}"
+
+    - name: Staging commits on the staging branch into images.yaml, without a PR
+      ansible.builtin.assert:
+        that:
+          - cfg.branch == 'staging'
+          - "'pullRequest' not in cfg"
+          - cfg.writeBackTarget == 'helmvalues:/clusters/mairie360/instances/staging/images.yaml'
+        fail_msg: "{{ cfg | to_json }}"
+      vars:
+        cfg: "{{ (updaters | selectattr('metadata.name', 'equalto', 'staging') | first).spec.writeBackConfig.gitConfig }}"
+
+    - name: Database and liquibase-migrations are tracked like the services
+      ansible.builtin.assert:
+        that:
+          - "'ghcr.io/mairie360/database' in images"
+          - "'ghcr.io/mairie360/liquibase-migrations' in images"
+          - "'database.image.tag' in helm_tags"
+          - "'liquibase.image.tag' in helm_tags"
+        fail_msg: "{{ images | join(', ') }}"
+      vars:
+        refs: "{{ updaters | map(attribute='spec.applicationRefs') | flatten | map(attribute='images') | flatten }}"
+        images: "{{ refs | map(attribute='imageName') | list }}"
+        helm_tags: "{{ refs | map(attribute='manifestTargets.helm.tag') | list }}"
+
+    - name: The ApplicationSet reads images.yaml after values.yaml, before the secrets
+      ansible.builtin.assert:
+        that: files[1:] == ['values.yaml', 'images.yaml', 'secrets.yaml']
+        fail_msg: "{{ appset.spec.template.spec.source.helm.valueFiles | join(', ') }}"
+      vars:
+        files: "{{ appset.spec.template.spec.source.helm.valueFiles | map('basename') | list }}"
+
+    - name: The ApplicationSet no longer preserves Helm parameters set outside git
+      ansible.builtin.assert:
+        that: "'ignoreApplicationDifferences' not in appset.spec"
+        fail_msg: "{{ appset.spec.ignoreApplicationDifferences | default('') | to_json }}"
+
+    - name: Staging syncs by itself, prod stays a deliberate sync
+      ansible.builtin.assert:
+        that:
+          - "'staging' in deploiment_auto_sync_envs"
+          - "'prod' not in deploiment_auto_sync_envs"
