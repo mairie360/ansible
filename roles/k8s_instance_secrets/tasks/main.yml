@@ -13,9 +13,16 @@
 #      variables, else keeps what the instance already has, else prompts;
 #      the admin account e-mail (MAIR-170) is resolved the same way but is
 #      mandatory: the play fails if it is still empty after the prompt;
-#   3. runs seal-secrets.sh (generated secrets — JWT, Postgres, Redis — are
-#      kept when they already exist on the instance, never rotated here);
-#   4. copies secrets.yaml back into the local Deploiment checkout, and the
+#      the Resend key is mandatory at the first sealing (MAIR-599);
+#   3. resolves RESTIC_PASSWORD and the admin account's first ADMIN_PASSWORD
+#      (instance, else the operator's backup file, else generated) and backs
+#      their plaintext up on the operator's machine, in operator_backup_dir
+#      (MAIR-599); fetches and deletes the admin password files an older run
+#      of seal-secrets.sh left on the Argo CD machine;
+#   4. runs seal-secrets.sh with them (the other generated secrets — JWT,
+#      Postgres, Redis — are kept when they already exist on the instance,
+#      never rotated here);
+#   5. copies secrets.yaml back into the local Deploiment checkout, and the
 #      instance sealing key into sealing_keys_dir.
 #
 # Committing and pushing secrets.yaml stays a manual step: Argo CD only
@@ -143,16 +150,55 @@
     label: "{{ item.key }}"
   no_log: true
 
+# MAIR-599: the generated values this role backs up, and whether this is the
+# first sealing. Unlike the read above, a kubectl error fails the play
+# instead of reading as "absent": an absent RESTIC_PASSWORD gets generated,
+# and a new one would make every existing backup unreadable.
+- name: Read the generated secrets already sealed on the instance
+  ansible.builtin.shell: |
+    set -euo pipefail
+    K="kubectl --kubeconfig {{ instance_kubeconfig }} -n {{ instance_ns }}"
+    backup=$($K get secret {{ env_name }}-backup-secret -o json --ignore-not-found)
+    db=$($K get secret {{ env_name }}-database-secret -o json --ignore-not-found)
+    keycloak=$($K get secret {{ env_name }}-keycloak-secret -o name --ignore-not-found)
+    [ -n "$backup" ] || backup='{}'
+    [ -n "$db" ] || db='{}'
+    jq -cn --argjson backup "$backup" --argjson db "$db" --arg keycloak "$keycloak" '{
+      restic_password: (($backup.data.RESTIC_PASSWORD // "") | @base64d),
+      admin_password:  (($db.data.ADMIN_PASSWORD // "") | @base64d),
+      keycloak_secret: ($keycloak != "")
+    }'
+  args:
+    executable: /bin/bash
+  delegate_to: "{{ argocd_host }}"
+  register: generated_on_cluster_raw
+  changed_when: false
+  no_log: true
+
+- name: Keep the generated secrets already sealed on the instance
+  ansible.builtin.set_fact:
+    generated_on_cluster:
+      restic_password: "{{ (generated_on_cluster_raw.stdout | from_json).restic_password }}"
+      admin_password: "{{ (generated_on_cluster_raw.stdout | from_json).admin_password }}"
+    keycloak_on_cluster: "{{ (generated_on_cluster_raw.stdout | from_json).keycloak_secret }}"
+  no_log: true
+
 # --- Prompts -----------------------------------------------------------------
 # Only for what is neither provided nor already on the instance. The backup
 # bucket keys are only asked when backup.enabled is true in the instance
 # values, the Cockpit token when global.observability.enabled is (MAIR-131:
-# to seal it before enabling, pass COCKPIT_TOKEN or instance_secrets instead). Leave a prompt empty to skip it: seal-secrets.sh then seals the key
-# empty and verify.yml reports it.
+# to seal it before enabling, pass COCKPIT_TOKEN or instance_secrets instead).
+# Leave a prompt empty to skip it: seal-secrets.sh then seals the key empty
+# and verify.yml reports it. Except the Resend key at the first sealing
+# (MAIR-599, tasks/check_first_sealing.yml): the play then fails.
 
 - name: Ask for the missing external secrets
   ansible.builtin.pause:
-    prompt: "[{{ inventory_hostname }}] {{ item.label }} (hidden, empty to skip)"
+    prompt: >-
+      [{{ inventory_hostname }}] {{ item.label }}
+      ({{ 'hidden, MANDATORY at the first sealing'
+          if item.key == 'resend_api_key' and not keycloak_on_cluster | bool
+          else 'hidden, empty to skip' }})
     echo: false
   register: secret_prompts
   loop:
@@ -204,6 +250,8 @@
   when:
     - admin_email_prompt is not skipped
     - admin_email_prompt.user_input | length > 0
+  # resolved_secrets holds the other secrets too.
+  no_log: true
 
 - name: Fail when the admin account e-mail is missing
   ansible.builtin.assert:
@@ -213,6 +261,9 @@
       instance_secrets[{{ inventory_hostname }}].admin_email, export
       ADMIN_EMAIL, or answer the prompt above. seal-secrets.sh needs it to
       replace Database's public template admin account.
+
+- name: Require the Resend API key at the first sealing (MAIR-599)
+  ansible.builtin.include_tasks: check_first_sealing.yml
 
 # --- GHCR pull secret ----------------------------------------------------------
 # seal-secrets.sh only writes ghcr-secret when GHCR_TOKEN is set: without it,
@@ -249,6 +300,126 @@
       (GHCR_USER / GHCR_TOKEN unset, no argocd/ghcr-secret): sealing now would
       remove it. Export GHCR_USER / GHCR_TOKEN or re-run site.yml (phase 2 asks).
 
+# --- Generated secrets backed up on the operator's machine (MAIR-599) ---------
+# RESTIC_PASSWORD (losing it = every backup unreadable) and the admin
+# account's first ADMIN_PASSWORD (the instance only gets its argon2id hash)
+# are resolved here and passed to seal-secrets.sh, so that the value sealed
+# is exactly the one backed up in operator_backup_dir. See
+# tasks/resolve_generated.yml for the order (instance, file, generated).
+
+- name: Create the operator's backup directory
+  ansible.builtin.file:
+    path: "{{ operator_backup_dir }}"
+    state: directory
+    mode: "0700"
+  delegate_to: localhost
+  become: false
+
+# Before MAIR-599 this role let seal-secrets.sh generate ADMIN_PASSWORD,
+# which wrote the plaintext on the Argo CD machine
+# (/root/.mairie360/admin-<org>-<env>.txt, older ones renamed with a date
+# suffix). Bring them to the operator's machine, then delete them there.
+- name: Find admin password files left on the Argo CD machine
+  ansible.builtin.find:
+    paths: /root/.mairie360
+    patterns: "admin-{{ org_id }}-{{ env_name }}.txt*"
+  delegate_to: "{{ argocd_host }}"
+  register: admin_leftovers
+
+- name: Check which admin password files already exist on the operator's machine
+  ansible.builtin.stat:
+    path: "{{ operator_backup_dir }}/{{ item.path | basename }}"
+  loop: "{{ admin_leftovers.files }}"
+  loop_control:
+    label: "{{ item.path | basename }}"
+  delegate_to: localhost
+  become: false
+  register: admin_leftovers_local
+
+# An existing local file is never overwritten: the copy gets a suffix.
+- name: Fetch the admin password files to the operator's machine
+  ansible.builtin.fetch:
+    src: "{{ item.item.path }}"
+    dest: >-
+      {{ operator_backup_dir }}/{{ item.item.path | basename }}{{
+         ('.from-' ~ argocd_host) if item.stat.exists else '' }}
+    flat: true
+  loop: "{{ admin_leftovers_local.results }}"
+  loop_control:
+    label: "{{ item.item.path | basename }}"
+  delegate_to: "{{ argocd_host }}"
+  register: admin_leftovers_fetched
+  no_log: true
+
+- name: Restrict the fetched admin password files to the operator
+  ansible.builtin.file:
+    path: "{{ item.dest }}"
+    mode: "0600"
+  loop: "{{ admin_leftovers_fetched.results | default([]) }}"
+  loop_control:
+    label: "{{ item.dest | basename }}"
+  delegate_to: localhost
+  become: false
+
+- name: Delete the admin password files from the Argo CD machine
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: absent
+  loop: "{{ admin_leftovers.files }}"
+  loop_control:
+    label: "{{ item.path | basename }}"
+  delegate_to: "{{ argocd_host }}"
+
+- name: Check the operator's backup files
+  ansible.builtin.stat:
+    path: "{{ operator_backup_dir }}/{{ item.value }}-{{ org_id }}-{{ env_name }}.txt"
+  loop: "{{ generated_backup_files | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  delegate_to: localhost
+  become: false
+  register: generated_backup_stats
+
+- name: Read the operator's backup files
+  ansible.builtin.slurp:
+    src: "{{ item.stat.path }}"
+  loop: "{{ generated_backup_stats.results | selectattr('stat.exists') | list }}"
+  loop_control:
+    label: "{{ item.item.key }}"
+  delegate_to: localhost
+  become: false
+  register: generated_backup_reads
+  no_log: true
+
+- name: Keep the contents of the operator's backup files
+  ansible.builtin.set_fact:
+    generated_backups: >-
+      {{ {'restic_password': '', 'admin_password': ''}
+         | combine(dict(generated_backup_reads.results
+                        | map(attribute='item.item.key')
+                        | zip(generated_backup_reads.results
+                              | map(attribute='content') | map('b64decode') | map('trim')))) }}
+  no_log: true
+
+- name: Resolve RESTIC_PASSWORD and ADMIN_PASSWORD
+  ansible.builtin.include_tasks: resolve_generated.yml
+
+# Before sealing: a value sealed but not backed up would be lost. A backup
+# file holding another value than the instance is kept with a date suffix.
+- name: Back up the generated secrets on the operator's machine
+  ansible.builtin.copy:
+    content: "{{ item.value }}\n"
+    dest: "{{ operator_backup_dir }}/{{ generated_backup_files[item.key] }}-{{ org_id }}-{{ env_name }}.txt"
+    mode: "0600"
+    backup: true
+  loop: "{{ generated_backup_writes | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  delegate_to: localhost
+  become: false
+  diff: false
+  no_log: true
+
 # --- Sealing -------------------------------------------------------------------
 
 - name: Seal the instance secrets (Deploiment/scripts/seal-secrets.sh)
@@ -265,6 +436,9 @@
     AWS_SECRET_ACCESS_KEY: "{{ resolved_secrets.backup_secret_access_key }}"
     COCKPIT_TOKEN: "{{ resolved_secrets.cockpit_token }}"
     ADMIN_EMAIL: "{{ resolved_secrets.admin_email }}"
+    # MAIR-599: always set, so seal-secrets.sh never generates them itself.
+    RESTIC_PASSWORD: "{{ generated_seal.restic_password }}"
+    ADMIN_PASSWORD: "{{ generated_seal.admin_password }}"
     GHCR_USER: "{{ ghcr_seal_user }}"
     GHCR_TOKEN: "{{ ghcr_seal_token }}"
   delegate_to: "{{ argocd_host }}"
@@ -289,16 +463,6 @@
     dest: "{{ deploiment_local_path }}/{{ instance_dir }}/secrets.yaml"
     flat: true
   delegate_to: "{{ argocd_host }}"
-
-# TODO (MAIR-170): seal-secrets.sh generates ADMIN_PASSWORD itself and only
-# ever prints a "généré" marker for it, never the value — it is sealed
-# straight from its own shell variable and never appears in seal_run.stdout
-# or on the instance (the cluster only gets it once secrets.yaml is committed
-# and Argo CD syncs it, well after this role returns). There is currently no
-# way for this role to read the generated value back to deposit it at
-# ~/.mairie360/admin-<org>-<env>.txt (mode 600) as the acceptance criteria of
-# MAIR-170 ask. Wire this up once seal-secrets.sh surfaces the value on a
-# channel this role can read without also showing it in the debug task above.
 
 # --- Sealing key backup ------------------------------------------------------
 # Losing this key makes every committed secrets.yaml of the instance
@@ -346,9 +510,18 @@
   ansible.builtin.debug:
     msg:
       - "Secrets of {{ org_id }}/{{ env_name }} sealed."
-      - "Admin account e-mail: {{ resolved_secrets.admin_email }} (MAIR-170; the generated ADMIN_PASSWORD is not printed here, see the TODO in this role)"
+      - "RESTIC_PASSWORD ({{ generated_sources.restic_password }}): {{ restic_file }} (store it in the team vault)"
+      - "{{ admin_first_login_line[generated_sources.admin_password] }}"
       - "Written: {{ deploiment_local_path }}/{{ instance_dir }}/secrets.yaml"
       - "Sealing key: {{ sealing_keys_dir }}/{{ org_id }}-{{ env_name }}.yaml (store it in the team vault)"
       - "Argo CD deploys them once pushed to {{ deploiment_repo_branch }}:"
       - "  cd {{ deploiment_local_path }} && git add {{ instance_dir }}/secrets.yaml && git commit -m 'chore({{ env_name }}): seal secrets' && git push"
       - "{{ env_name }} follows the branch {{ deploiment_env_revisions[env_name] | default(deploiment_repo_branch) }}: unless that is {{ deploiment_repo_branch }}, promote the commit with the Promote workflow of Deploiment."
+  vars:
+    admin_file: "{{ operator_backup_dir }}/admin-{{ org_id }}-{{ env_name }}.txt"
+    restic_file: "{{ operator_backup_dir }}/restic-{{ org_id }}-{{ env_name }}.txt"
+    admin_first_login_line:
+      cluster: "ADMIN_PASSWORD: argon2id hash kept from the instance; its plaintext is in {{ admin_file }} if a previous run backed it up"
+      cluster-plaintext: "ADMIN_PASSWORD: plaintext sealed before MAIR-414, now sealed as its hash; plaintext backed up in {{ admin_file }}"
+      backup: "ADMIN_PASSWORD (first login of the admin account): from {{ admin_file }}"
+      generated: "ADMIN_PASSWORD (first login of the admin account): generated, in {{ admin_file }} (store it in the team vault)"
