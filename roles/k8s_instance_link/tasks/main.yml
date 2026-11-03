@@ -186,15 +186,16 @@
       mairie360.fr/ingress={{ ingress_controller }} --overwrite
     # `kubectl annotate` reports "annotated" even when nothing changes:
     # compare first so that the task stays idempotent. REVISION is empty
-    # for an environment that must not carry the annotation.
-    CURRENT=$(kubectl -n argocd get secret "$SECRET" \
-      -o jsonpath='{.metadata.annotations.mairie360\.fr/revision}')
-    if [ "$CURRENT" != "$REVISION" ]; then
-      if [ -n "$REVISION" ]; then
+    # for an environment that must not carry the annotation: then the KEY is
+    # removed whenever present, even with an empty value (which jsonpath
+    # cannot tell from an absent key).
+    ANNOTATIONS=$(kubectl -n argocd get secret "$SECRET" -o json | jq -c '.metadata.annotations // {}')
+    if [ -n "$REVISION" ]; then
+      if [ "$(printf '%s' "$ANNOTATIONS" | jq -r '.["mairie360.fr/revision"] // empty')" != "$REVISION" ]; then
         kubectl -n argocd annotate secret "$SECRET" "mairie360.fr/revision=$REVISION" --overwrite
-      else
-        kubectl -n argocd annotate secret "$SECRET" mairie360.fr/revision-
       fi
+    elif printf '%s' "$ANNOTATIONS" | jq -e 'has("mairie360.fr/revision")' >/dev/null; then
+      kubectl -n argocd annotate secret "$SECRET" mairie360.fr/revision-
     fi
   args:
     executable: /bin/bash

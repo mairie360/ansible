@@ -67,7 +67,9 @@
 
     - name: Render the runner's RBAC and systemd unit
       ansible.builtin.set_fact:
-        rbac: "{{ lookup('ansible.builtin.template', '../roles/github_runner/templates/verify-rbac.yaml.j2', template_vars=template_vars) | ansible.builtin.from_yaml_all | select | list }}"
+        rbac: >-
+          {{ lookup('ansible.builtin.template', '../roles/github_runner/templates/verify-rbac.yaml.j2',
+              template_vars=template_vars) | ansible.builtin.from_yaml_all | select | list }}
         unit: "{{ lookup('ansible.builtin.template', '../roles/github_runner/templates/gh-runner.service.j2', template_vars=template_vars) }}"
 
     - name: Collect the rules of the runner's Roles
@@ -93,6 +95,11 @@
           - "'[\"bff\",\"keycloak-test\"]' in policy | replace(' ', '')"
           - "\"'api'\" not in policy"
           - "'automountServiceAccountToken' in policy"
+          # MAIR-346 review: the kubelet runs the commands of hooks and probes
+          - "'!has(c.lifecycle)' in policy"
+          - "'!has(c.livenessProbe)' in policy"
+          - "'!has(c.readinessProbe)' in policy"
+          - "'!has(c.startupProbe)' in policy"
           - "'verify-probe-keycloak-bff' in (rules | selectattr('resources', 'contains', 'pods/log') | first).resourceNames"
         fail_msg: "{{ policy }}"
 

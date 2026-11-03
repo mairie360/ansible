@@ -30,7 +30,7 @@ réseau vers un autre : l'isolation vient de la topologie.
 | 2 | `k8s_argocd` | `*_argocd` | Argo CD + `platform-app.yaml` + the group's ApplicationSet, `argocd/ghcr-secret`, `argocd/deploiment-git-creds`, one `ImageUpdater` per dev / staging instance |
 | 3 | `k8s_instance_link` | `*_instances` | `argocd cluster add` on the WireGuard IP + labels (`mairie360.fr/role`, `org`, `env`, `ingress`) + annotation `mairie360.fr/revision` |
 | 4 | `k8s_instance_secrets` | `*_instances` | Seals the instance secrets with `seal-secrets.sh`, asks for the missing external ones, copies `secrets.yaml` back to the local `Deploiment` checkout |
-| 5 | `github_runner` | `*_argocd` with `github_runner_enabled` | Ephemeral GitHub Actions runner of `Deploiment` and a least-privilege kubeconfig on staging, so the Promote workflow runs `verify.sh` before prod (MAIR-346) |
+| 5 | `github_runner` | `*_argocd` (installs with `github_runner_enabled`, removes otherwise) | Ephemeral GitHub Actions runner of `Deploiment` and a least-privilege kubeconfig on staging, so the Promote workflow runs `verify.sh` before prod (MAIR-346) |
 
 The `k8s_argocd` role installs **neither** cert-manager, **nor** the ingress
 controller, **nor** a ClusterIssuer: Argo CD deploys them on the instances,
@@ -130,7 +130,9 @@ open on the WireGuard tunnel, to the group's Argo CD machine). Phase 5
 (`roles/github_runner`) therefore installs a **self-hosted runner on the
 Argo CD machine**, which already has that route. It is opt-in per group
 (`github_runner_enabled`, only `true` in `group_vars/mairie360_argocd.yml`)
-and never opens anything:
+and never opens anything. Turning it off and re-running phase 5 removes what
+an earlier run installed: the service, the App credential, the kubeconfigs and
+the ServiceAccount, Roles and admission policy on each instance.
 
 | | |
 |---|---|
@@ -138,7 +140,7 @@ and never opens anything:
 | Ephemeral | One just-in-time (JIT) registration per job: `gh-runner.service` registers, runs one job, exits and systemd restarts it. Before every job the runner directory is re-copied from the pinned release and its `HOME` (`/var/lib/gh-runner/home`) emptied, so nothing a job writes survives |
 | User | `gh-runner`, non-root system user, no login shell, cannot write to `/home/gh-runner`. The systemd unit is sandboxed (`ProtectSystem=strict`, `NoNewPrivileges`, `PrivateTmp`, no access to `/root` nor `/etc/gh-runner`) |
 | Network | Outbound HTTPS to GitHub only: no inbound port, no firewall or WireGuard change. The unit's `IPAddressDeny` blocks the tunnel subnet and this machine's pod and Service networks (Argo CD), except the WireGuard IPs of the verified instances |
-| Instance access | For each env of `github_runner_verify_envs` (default `staging`): ServiceAccount `mairie360-ci/verify-runner` with exactly the rules listed at the top of `Deploiment/scripts/verify.sh` (no Secret read, no exec; mapped to its steps in `roles/github_runner/templates/verify-rbac.yaml.j2`), plus a `ValidatingAdmissionPolicy` that only lets it create, attach to and delete `verify-probe-*` pods of image `curlimages/curl:8.10.1` with no volume, env nor token, labelled at most `app.kubernetes.io/component` = `bff` or `keycloak-test` (`github_runner_probe_components`; never `api`, which would reach Postgres). With no Secret read, `verify.sh` skips its two plaintext checks there (argon2id `ADMIN_PASSWORD`, URL-safe passwords); run as root they still apply. Kubeconfig: `/home/gh-runner/.kube/instance-<env>.yaml` (root:gh-runner, 0440, one context `<env>`, current). The admin kubeconfigs of `/root/.kube/` are never readable by the runner |
+| Instance access | For each env of `github_runner_verify_envs` (default `staging`): ServiceAccount `mairie360-ci/verify-runner` with exactly the rules listed at the top of `Deploiment/scripts/verify.sh` (no Secret read, no exec; mapped to its steps in `roles/github_runner/templates/verify-rbac.yaml.j2`), plus a `ValidatingAdmissionPolicy` that only lets it create, attach to and delete `verify-probe-*` pods of image `curlimages/curl:8.10.1` with no volume, env nor token, labelled at most `app.kubernetes.io/component` = `bff` or `keycloak-test` (`github_runner_probe_components`; never `api`, which would reach Postgres), with no command, lifecycle hook nor liveness/readiness/startup probe (the kubelet runs their commands in the container). With no Secret read, `verify.sh` skips its two plaintext checks there (argon2id `ADMIN_PASSWORD`, URL-safe passwords); run as root they still apply. Kubeconfig: `/home/gh-runner/.kube/instance-<env>.yaml` (root:gh-runner, 0440, one context `<env>`, current); the role fails when another account is a member of the `gh-runner` group, which could read the token. The admin kubeconfigs of `/root/.kube/` are never readable by the runner |
 | Version | `github_runner_version` + `github_runner_sha256` in `inventory/group_vars/all.yml`. GitHub stops sending jobs to a runner more than 30 days behind: bump it at least monthly |
 
 **Registration credential.** A GitHub App installed on `mairie360/Deploiment`

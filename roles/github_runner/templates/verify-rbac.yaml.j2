@@ -80,10 +80,15 @@ rules:
   - apiGroups: [batch]
     resources: [jobs]
     verbs: [get, list]
+  # Step 5b (MAIR-680) lists the Deployments, StatefulSets and CronJobs to
+  # check that no workload but core-api reads JWT_PRIVATE_KEY (their specs
+  # hold secretKeyRefs, never secret values); step 11 reads the backup one.
   - apiGroups: [batch]
     resources: [cronjobs]
-    resourceNames: [{{ github_runner_env }}-backup]
-    verbs: [get]
+    verbs: [get, list]
+  - apiGroups: [apps]
+    resources: [statefulsets]
+    verbs: [list]
   - apiGroups: [bitnami.com]
     resources: [sealedsecrets]
     resourceNames:
@@ -180,6 +185,10 @@ spec:
          && object.spec.containers.all(c,
               c.image == '{{ github_runner_probe_image }}'
               && !has(c.command)
+              && !has(c.lifecycle)
+              && !has(c.livenessProbe)
+              && !has(c.readinessProbe)
+              && !has(c.startupProbe)
               && (!has(c.env) || size(c.env) == 0)
               && (!has(c.envFrom) || size(c.envFrom) == 0)
               && (!has(c.volumeMounts) || size(c.volumeMounts) == 0)
@@ -196,7 +205,8 @@ spec:
                              && object.metadata.labels[k] in {{ github_runner_probe_components | to_json }}))))
       message: >-
         verify-runner may only create the scripts/verify.sh probe pods
-        ({{ github_runner_probe_prefix }}*, {{ github_runner_probe_image }}, no volume, no env, no token).
+        ({{ github_runner_probe_prefix }}*, {{ github_runner_probe_image }}, no volume, no env, no token,
+        no lifecycle hook or probe: the kubelet runs their commands in the container).
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
