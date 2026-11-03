@@ -15,6 +15,21 @@
     enabled: false
   when: github_runner_unit_stat.stat.exists
 
+# Credentials first: a failed deletion on an instance below must not leave
+# the App key or the ServiceAccount kubeconfigs on disk. /opt/gh-runner holds
+# the applied RBAC files and goes last, so that a rerun can retry them.
+- name: Remove the runner's credentials, kubeconfigs and unit
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /etc/systemd/system/gh-runner.service
+    - /etc/gh-runner
+    - "/home/{{ github_runner_user }}"
+    - /var/lib/gh-runner
+    - /usr/local/lib/gh-runner
+  register: github_runner_files_removed
+
 # RBAC files applied by verify_access.yml, one per verified instance: deleting
 # them removes the ServiceAccount, its token, the Roles and the admission
 # policy on that instance (never the instance namespace, not in the file).
@@ -34,18 +49,10 @@
   register: github_runner_rbac_delete
   changed_when: "'deleted' in github_runner_rbac_delete.stdout"
 
-- name: Remove the runner's credentials, kubeconfigs, unit and files
+- name: Remove the runner release and the applied RBAC files
   ansible.builtin.file:
-    path: "{{ item }}"
+    path: /opt/gh-runner
     state: absent
-  loop:
-    - /etc/systemd/system/gh-runner.service
-    - /etc/gh-runner
-    - "/home/{{ github_runner_user }}"
-    - /var/lib/gh-runner
-    - /usr/local/lib/gh-runner
-    - /opt/gh-runner
-  register: github_runner_files_removed
 
 # Not a handler: the role ends right after (meta: end_role), before handlers run.
 - name: Reload systemd after removing the unit  # noqa: no-handler

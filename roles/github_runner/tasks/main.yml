@@ -209,6 +209,25 @@
          else github_runner_app_key_path_prompt.user_input | default('') }}
   no_log: true
 
+- name: Read the installed App ID
+  ansible.builtin.slurp:
+    src: /etc/gh-runner/app-id
+  register: github_runner_app_id_installed
+  when: github_runner_app_id_stat.stat.exists
+
+# The installed key belongs to the installed App: a new App ID with the old
+# key would sign JWTs GitHub refuses, and prepare.sh would fail on every start.
+- name: Fail on a new App ID without its private key file
+  ansible.builtin.assert:
+    that: >-
+      github_runner_app_key_src | length > 0
+      or not github_runner_app_id_stat.stat.exists
+      or (github_runner_app_id_installed.content | b64decode | trim) == github_runner_app_id_resolved
+    fail_msg: >-
+      GitHub App ID {{ github_runner_app_id_resolved }} differs from the one installed on this
+      machine: set GITHUB_RUNNER_APP_PRIVATE_KEY_FILE to that App's private key (.pem) too.
+  when: github_runner_app_id_resolved | length > 0
+
 - name: Check the App private key file on the controller
   ansible.builtin.stat:
     path: "{{ github_runner_app_key_src | expanduser }}"
@@ -257,6 +276,7 @@
     github_runner_app_ready: >-
       {{ (github_runner_app_key_stat.stat.exists or github_runner_app_key_src | length > 0)
          and (github_runner_app_id_stat.stat.exists or github_runner_app_id_resolved | length > 0) }}
+  no_log: true
 
 # --- Service ----------------------------------------------------------------
 
@@ -308,9 +328,7 @@
 - name: Runner summary
   ansible.builtin.debug:
     msg:
-      - >-
-        Runner of {{ github_runner_repo }} on {{ inventory_hostname }}:
-        {{ 'started' if github_runner_app_ready | bool else 'NOT started (no App credential)' }}
+      - "Runner of {{ github_runner_repo }} on {{ inventory_hostname }} (started unless warned above)"
       - "Labels: {{ github_runner_labels | join(', ') }} (runs-on: [{{ github_runner_labels | join(', ') }}])"
       - "Kubeconfigs:{% for t in github_runner_targets %} /home/{{ github_runner_user }}/.kube/instance-{{ t.env_name }}.yaml{% endfor %}"
       - "Logs: journalctl -u gh-runner"
