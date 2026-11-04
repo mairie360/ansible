@@ -1,1 +1,4 @@
 org_id: mairie360
+# MAIR-346: the Deploiment "Promote" workflow runs scripts/verify.sh on
+# staging from a runner on this machine (role github_runner).
+github_runner_enabled: true

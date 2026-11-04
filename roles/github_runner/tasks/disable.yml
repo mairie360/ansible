@@ -1,0 +1,66 @@
+---
+# The group opted out (github_runner_enabled: false): take back everything a
+# previous run installed, so no runner keeps taking jobs with access to an
+# instance. Idempotent, and a no-op on a machine that never had the runner.
+
+- name: Check for an installed gh-runner.service
+  ansible.builtin.stat:
+    path: /etc/systemd/system/gh-runner.service
+  register: github_runner_unit_stat
+
+- name: Stop and disable gh-runner
+  ansible.builtin.systemd:
+    name: gh-runner
+    state: stopped
+    enabled: false
+  when: github_runner_unit_stat.stat.exists
+
+# Credentials first: a failed deletion on an instance below must not leave
+# the App key or the ServiceAccount kubeconfigs on disk. /opt/gh-runner holds
+# the applied RBAC files and goes last, so that a rerun can retry them.
+- name: Remove the runner's credentials, kubeconfigs and unit
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /etc/systemd/system/gh-runner.service
+    - /etc/gh-runner
+    - "/home/{{ github_runner_user }}"
+    - /var/lib/gh-runner
+    - /usr/local/lib/gh-runner
+  register: github_runner_files_removed
+
+# RBAC files applied by verify_access.yml, one per verified instance: deleting
+# them removes the ServiceAccount, its token, the Roles and the admission
+# policy on that instance (never the instance namespace, not in the file).
+- name: Find the runner's RBAC applied on the instances
+  ansible.builtin.find:
+    paths: /opt/gh-runner
+    patterns: ["verify-rbac-*.yaml"]
+  register: github_runner_rbac_files
+
+- name: Remove the runner's access from each instance
+  ansible.builtin.command: "kubectl delete --ignore-not-found -f {{ item.path }}"
+  environment:
+    KUBECONFIG: "/root/.kube/instance-{{ item.path | basename | regex_replace('^verify-rbac-(.*)\\.yaml$', '\\1') }}.yaml"
+  loop: "{{ github_runner_rbac_files.files }}"
+  loop_control:
+    label: "{{ item.path | basename }}"
+  register: github_runner_rbac_delete
+  changed_when: "'deleted' in github_runner_rbac_delete.stdout"
+
+- name: Remove the runner release and the applied RBAC files
+  ansible.builtin.file:
+    path: /opt/gh-runner
+    state: absent
+
+# Not a handler: the role ends right after (meta: end_role), before handlers run.
+- name: Reload systemd after removing the unit  # noqa: no-handler
+  ansible.builtin.systemd:
+    daemon_reload: true
+  when: github_runner_files_removed is changed
+
+- name: Remove the runner system user
+  ansible.builtin.user:
+    name: "{{ github_runner_user }}"
+    state: absent

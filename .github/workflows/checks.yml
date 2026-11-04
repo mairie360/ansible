@@ -1,7 +1,7 @@
 # Static checks of the repository: no public IP address in a tracked file (MAIR-708),
 # image-updater templates (MAIR-186, MAIR-444), ansible-lint, no secret logged, the
 # instance secrets rules and the followed images against Deploiment (MAIR-599),
-# no secret in new commits (MAIR-677).
+# no secret in new commits (MAIR-677), the promotion runner (MAIR-346).
 name: Checks
 
 on:
@@ -59,6 +59,17 @@ jobs:
         run: pipx install ansible-core==2.20.7
       - name: Render the image-updater templates
         run: ansible-playbook tests/image_updater_test.yml
+
+  github-runner:
+    # MAIR-346: bootstrap revision annotation, the promotion runner's RBAC,
+    # admission policy and network sandbox.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install ansible-core
+        run: pipx install ansible-core==2.20.7
+      - name: Render the runner and revision templates
+        run: ansible-playbook tests/github_runner_test.yml
 
   ansible-lint:
     # MAIR-599. Pre-existing violations: .ansible-lint / .ansible-lint-ignore.
