@@ -156,7 +156,11 @@
 # --- Least-privilege access to the verified instances ----------------------------
 
 - name: Give the runner access to each verified instance
-  ansible.builtin.include_tasks: verify_access.yml
+  ansible.builtin.include_tasks:
+    file: verify_access.yml
+    apply:
+      tags: [github_runner]
+  tags: [github_runner]
   loop: "{{ github_runner_targets }}"
   loop_control:
     loop_var: github_runner_target
