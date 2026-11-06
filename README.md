@@ -178,6 +178,14 @@ when `gh-runner.service` is not active. On the machine:
 annotation, the runner's RBAC, admission policy and systemd unit on
 localhost and pins the rules above.
 
+Besides the rules listed in `verify.sh`'s header, the runner may `list` the
+`Certificates` (cert-manager.io) and `Ingresses` of the instance namespace
+(MAIR-795): `verify.sh` step 12c fails a Certificate whose HTTP-01 solver class
+is not the one its Ingress asks for. Without that grant the step is skipped, so
+**recreate any misaligned Certificate before applying it to an environment**
+(`kubectl -n mairie360-<env> delete certificate <name>`), or the next Promote's
+`verify-staging` fails on it. Re-run `--tags github_runner` to apply it.
+
 ## Usage
 
 Clone `Deploiment` next to this repo (`Devops/ansible` + `Devops/Deploiment`):

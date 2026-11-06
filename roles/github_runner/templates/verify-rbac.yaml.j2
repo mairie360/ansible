@@ -21,6 +21,8 @@
 #     batch        jobs            get list            steps 7, 11
 #     batch        cronjobs        get                 step 11 ({{ github_runner_env }}-backup only)
 #     bitnami.com  sealedsecrets   get                 step 4 (the four instance SealedSecrets only)
+#     cert-manager.io    certificates  list            step 12c (MAIR-795): HTTP-01 solver class of each Certificate
+#     networking.k8s.io  ingresses     list            step 12c (MAIR-795): the class its Ingress asks for
 #   namespace kube-system
 #     apps         daemonsets      get list watch      step 10, resourceNames cilium
 #     apps         deployments     get list watch      step 10, resourceNames hubble-relay
@@ -97,6 +99,16 @@ rules:
       - {{ github_runner_env }}-redis
       - {{ github_runner_env }}-keycloak-secret
     verbs: [get]
+  # Step 12c (MAIR-795) compares each Certificate's HTTP-01 solver class with
+  # the one its owning Ingress asks for (metadata only: no Secret is involved,
+  # the TLS Secrets stay unreadable). Without these two reads the step is
+  # skipped, not failed.
+  - apiGroups: [cert-manager.io]
+    resources: [certificates]
+    verbs: [list]
+  - apiGroups: [networking.k8s.io]
+    resources: [ingresses]
+    verbs: [list]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
