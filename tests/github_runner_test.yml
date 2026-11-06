@@ -88,6 +88,20 @@
           - rbac | selectattr('kind', 'in', ['ClusterRole', 'ClusterRoleBinding']) | list == []
         fail_msg: "{{ rules | to_json }}"
 
+    # MAIR-795: verify.sh step 12c lists the Certificates and Ingresses of the
+    # instance namespace (metadata only). Exactly that, read-only, and none of
+    # the TLS Secrets they point to.
+    - name: The runner reads Certificates and Ingresses, list only
+      ansible.builtin.assert:
+        that:
+          - (rules | selectattr('resources', 'contains', 'certificates') | list | length) == 1
+          - (rules | selectattr('resources', 'contains', 'certificates') | first).apiGroups == ['cert-manager.io']
+          - (rules | selectattr('resources', 'contains', 'certificates') | first).verbs == ['list']
+          - (rules | selectattr('resources', 'contains', 'ingresses') | list | length) == 1
+          - (rules | selectattr('resources', 'contains', 'ingresses') | first).apiGroups == ['networking.k8s.io']
+          - (rules | selectattr('resources', 'contains', 'ingresses') | first).verbs == ['list']
+        fail_msg: "{{ rules | to_json }}"
+
     - name: Probe pods may impersonate a BFF or Keycloak's test client, never an API
       ansible.builtin.assert:
         that:
