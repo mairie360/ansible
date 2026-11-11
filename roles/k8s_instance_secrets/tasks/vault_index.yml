@@ -2,7 +2,7 @@
 # =============================================================================
 # The instance's secrets in the vault (MAIR-617)
 #
-# They are created by Terraform (mairie360/terraform, modules/instance), never
+# They are created by Terraform (mairie360/Infra, modules/instance), never
 # by this role: a missing one stops the play before anything is sealed.
 # Sets vault_ids {secret name: id}.
 # =============================================================================
@@ -32,7 +32,7 @@
     quiet: true
     fail_msg: >-
       Secret Manager has no {{ vault_missing | join(', ') }} under {{ vault_path }}:
-      run `terraform apply` in mairie360/terraform (orgs/{{ org_id }}) first.
+      run `terraform apply` in mairie360/Infra (orgs/{{ org_id }}) first.
       This role never creates them, and nothing is created by hand (MAIR-617).
   vars:
     vault_missing: "{{ vault_ids | vault_missing(vault_entries.values() | list) }}"
