@@ -15,15 +15,20 @@
 #      mandatory: the play fails if it is still empty after the prompt;
 #      the Resend key is mandatory at the first sealing (MAIR-599);
 #   3. resolves RESTIC_PASSWORD and the admin account's first ADMIN_PASSWORD
-#      (instance, else the operator's backup file, else generated) and backs
-#      their plaintext up on the operator's machine, in operator_backup_dir
-#      (MAIR-599); fetches and deletes the admin password files an older run
-#      of seal-secrets.sh left on the Argo CD machine;
+#      (instance, else the vault, else generated) and stores their plaintext
+#      in Scaleway Secret Manager (MAIR-599, MAIR-617); the copies earlier
+#      runs left on the workstation (~/.mairie360) and on the Argo CD machine
+#      are uploaded too, read back, then deleted;
 #   4. runs seal-secrets.sh with them (the other generated secrets — JWT,
 #      Postgres, Redis — are kept when they already exist on the instance,
 #      never rotated here);
-#   5. copies secrets.yaml back into the local Deploiment checkout, and the
-#      instance sealing key into sealing_keys_dir.
+#   5. copies secrets.yaml back into the local Deploiment checkout, and adds
+#      the instance sealing keys the vault does not have yet (one version per
+#      key).
+#
+# The vault's secrets are created by Terraform (mairie360/terraform), never by
+# this role: it fails before sealing when one is missing. Nothing secret is
+# written on the workstation.
 #
 # Committing and pushing secrets.yaml stays a manual step: Argo CD only
 # deploys the secrets once it is on the tracked branch.
@@ -300,25 +305,28 @@
       (GHCR_USER / GHCR_TOKEN unset, no argocd/ghcr-secret): sealing now would
       remove it. Export GHCR_USER / GHCR_TOKEN or re-run site.yml (phase 2 asks).
 
-# --- Generated secrets backed up on the operator's machine (MAIR-599) ---------
+# --- Generated secrets stored in the vault (MAIR-599, MAIR-617) ---------------
 # RESTIC_PASSWORD (losing it = every backup unreadable) and the admin
 # account's first ADMIN_PASSWORD (the instance only gets its argon2id hash)
 # are resolved here and passed to seal-secrets.sh, so that the value sealed
-# is exactly the one backed up in operator_backup_dir. See
-# tasks/resolve_generated.yml for the order (instance, file, generated).
+# is exactly the one stored in Scaleway Secret Manager. See
+# tasks/resolve_generated.yml for the order (instance, vault, generated).
+# Nothing is written on the workstation: the local files of MAIR-599 are
+# uploaded, read back, then deleted.
 
-- name: Create the operator's backup directory
-  ansible.builtin.file:
-    path: "{{ operator_backup_dir }}"
-    state: directory
-    mode: "0700"
-  delegate_to: localhost
-  become: false
+- name: Resolve the vault credentials (MAIR-617)
+  ansible.builtin.include_tasks: vault_credentials.yml
+
+- name: Find the instance's secrets in the vault
+  ansible.builtin.include_tasks: vault_index.yml
+
+- name: Read the generated secrets from the vault
+  ansible.builtin.include_tasks: vault_read.yml
 
 # Before MAIR-599 this role let seal-secrets.sh generate ADMIN_PASSWORD,
 # which wrote the plaintext on the Argo CD machine
 # (/root/.mairie360/admin-<org>-<env>.txt, older ones renamed with a date
-# suffix). Bring them to the operator's machine, then delete them there.
+# suffix). They go to the vault, then are deleted there.
 - name: Find admin password files left on the Argo CD machine
   ansible.builtin.find:
     paths: /root/.mairie360
@@ -326,38 +334,87 @@
   delegate_to: "{{ argocd_host }}"
   register: admin_leftovers
 
-- name: Check which admin password files already exist on the operator's machine
-  ansible.builtin.stat:
-    path: "{{ operator_backup_dir }}/{{ item.path | basename }}"
+- name: Read the admin password files left on the Argo CD machine
+  ansible.builtin.slurp:
+    src: "{{ item.path }}"
   loop: "{{ admin_leftovers.files }}"
+  loop_control:
+    label: "{{ item.path | basename }}"
+  delegate_to: "{{ argocd_host }}"
+  register: admin_leftovers_read
+  no_log: true
+
+# Before MAIR-617 this role kept them on the workstation (MAIR-599).
+- name: Find the local backup files of MAIR-599
+  ansible.builtin.find:
+    paths: "{{ legacy_backup_dir }}"
+    patterns:
+      - "restic-{{ org_id }}-{{ env_name }}.txt*"
+      - "admin-{{ org_id }}-{{ env_name }}.txt*"
+  delegate_to: localhost
+  become: false
+  register: legacy_files
+
+- name: Read the local backup files of MAIR-599
+  ansible.builtin.slurp:
+    src: "{{ item.path }}"
+  loop: "{{ legacy_files.files }}"
   loop_control:
     label: "{{ item.path | basename }}"
   delegate_to: localhost
   become: false
-  register: admin_leftovers_local
-
-# An existing local file is never overwritten: the copy gets a suffix.
-- name: Fetch the admin password files to the operator's machine
-  ansible.builtin.fetch:
-    src: "{{ item.item.path }}"
-    dest: >-
-      {{ operator_backup_dir }}/{{ item.item.path | basename }}{{
-         ('.from-' ~ argocd_host) if item.stat.exists else '' }}
-    flat: true
-  loop: "{{ admin_leftovers_local.results }}"
-  loop_control:
-    label: "{{ item.item.path | basename }}"
-  delegate_to: "{{ argocd_host }}"
-  register: admin_leftovers_fetched
+  register: legacy_files_read
   no_log: true
 
-- name: Restrict the fetched admin password files to the operator
+- name: Sort the earlier copies of the generated secrets
+  ansible.builtin.set_fact:
+    legacy_generated: >-
+      {{ legacy_files_read.results | default([])
+         | vault_legacy_files(generated_backup_files, org_id, env_name, 'workstation') }}
+    leftover_generated: >-
+      {{ admin_leftovers_read.results | default([])
+         | vault_legacy_files({'admin_password': 'admin'}, org_id, env_name, argocd_host) }}
+  no_log: true
+
+# The vault wins over an earlier copy; the plain-named copy over a suffixed one.
+- name: Keep the generated secrets known before this run
+  ansible.builtin.set_fact:
+    generated_backups:
+      restic_password: >-
+        {{ vault_values.restic_password
+           or legacy_generated.exact.restic_password | default('') }}
+      admin_password: >-
+        {{ vault_values.admin_password
+           or legacy_generated.exact.admin_password | default('')
+           or leftover_generated.exact.admin_password | default('') }}
+  no_log: true
+
+- name: Resolve RESTIC_PASSWORD and ADMIN_PASSWORD
+  ansible.builtin.include_tasks: resolve_generated.yml
+
+# Every earlier copy that is not the value kept is archived as its own
+# version, so that deleting the files loses nothing.
+- name: Plan the versions of the generated secrets
+  ansible.builtin.set_fact:
+    vault_writes: >-
+      {{ vault_values | vault_generated_writes(
+           generated_backup_writes,
+           legacy_generated.candidates + leftover_generated.candidates,
+           vault_entries,
+           'sealed on ' ~ org_id ~ '/' ~ env_name) }}
+  no_log: true
+
+# Before sealing: a value sealed but not stored would be lost.
+- name: Store the generated secrets in the vault
+  ansible.builtin.include_tasks: vault_write.yml
+
+- name: Delete the local backup files of MAIR-599, now in the vault
   ansible.builtin.file:
-    path: "{{ item.dest }}"
-    mode: "0600"
-  loop: "{{ admin_leftovers_fetched.results | default([]) }}"
+    path: "{{ item.path }}"
+    state: absent
+  loop: "{{ legacy_files.files }}"
   loop_control:
-    label: "{{ item.dest | basename }}"
+    label: "{{ item.path | basename }}"
   delegate_to: localhost
   become: false
 
@@ -369,56 +426,6 @@
   loop_control:
     label: "{{ item.path | basename }}"
   delegate_to: "{{ argocd_host }}"
-
-- name: Check the operator's backup files
-  ansible.builtin.stat:
-    path: "{{ operator_backup_dir }}/{{ item.value }}-{{ org_id }}-{{ env_name }}.txt"
-  loop: "{{ generated_backup_files | dict2items }}"
-  loop_control:
-    label: "{{ item.key }}"
-  delegate_to: localhost
-  become: false
-  register: generated_backup_stats
-
-- name: Read the operator's backup files
-  ansible.builtin.slurp:
-    src: "{{ item.stat.path }}"
-  loop: "{{ generated_backup_stats.results | selectattr('stat.exists') | list }}"
-  loop_control:
-    label: "{{ item.item.key }}"
-  delegate_to: localhost
-  become: false
-  register: generated_backup_reads
-  no_log: true
-
-- name: Keep the contents of the operator's backup files
-  ansible.builtin.set_fact:
-    generated_backups: >-
-      {{ {'restic_password': '', 'admin_password': ''}
-         | combine(dict(generated_backup_reads.results
-                        | map(attribute='item.item.key')
-                        | zip(generated_backup_reads.results
-                              | map(attribute='content') | map('b64decode') | map('trim')))) }}
-  no_log: true
-
-- name: Resolve RESTIC_PASSWORD and ADMIN_PASSWORD
-  ansible.builtin.include_tasks: resolve_generated.yml
-
-# Before sealing: a value sealed but not backed up would be lost. A backup
-# file holding another value than the instance is kept with a date suffix.
-- name: Back up the generated secrets on the operator's machine
-  ansible.builtin.copy:
-    content: "{{ item.value }}\n"
-    dest: "{{ operator_backup_dir }}/{{ generated_backup_files[item.key] }}-{{ org_id }}-{{ env_name }}.txt"
-    mode: "0600"
-    backup: true
-  loop: "{{ generated_backup_writes | dict2items }}"
-  loop_control:
-    label: "{{ item.key }}"
-  delegate_to: localhost
-  become: false
-  diff: false
-  no_log: true
 
 # --- Sealing -------------------------------------------------------------------
 
@@ -464,36 +471,79 @@
     flat: true
   delegate_to: "{{ argocd_host }}"
 
-# --- Sealing key backup ------------------------------------------------------
-# Losing this key makes every committed secrets.yaml of the instance
-# undecryptable after a reinstall.
+# --- Sealing keys in the vault (MAIR-617) ---------------------------------------
+# Losing them makes every committed secrets.yaml of the instance
+# undecryptable after a reinstall. One version per key, its description being
+# the key's Secret name: the controller adds a key every 30 days.
 
-- name: Read the instance sealing key
+- name: Read the instance sealing keys
   ansible.builtin.command: >
     kubectl --kubeconfig {{ instance_kubeconfig }} -n kube-system get secret
-    -l sealedsecrets.bitnami.com/sealed-secrets-key -o yaml
+    -l sealedsecrets.bitnami.com/sealed-secrets-key -o json
   delegate_to: "{{ argocd_host }}"
   register: sealing_key
   changed_when: false
   no_log: true
 
-- name: Create the local sealing key directory
-  ansible.builtin.file:
-    path: "{{ sealing_keys_dir }}"
-    state: directory
-    mode: "0700"
+- name: List the sealing keys already in the vault
+  ansible.builtin.uri:
+    url: "{{ vault_api_url }}/secrets/{{ vault_ids[vault_entries.sealing_keys] }}/versions?page_size=100"
+    headers:
+      X-Auth-Token: "{{ vault_auth.secret_key }}"
+    return_content: true
   delegate_to: localhost
   become: false
-
-- name: Back up the sealing key on the workstation
-  ansible.builtin.copy:
-    content: "{{ sealing_key.stdout }}\n"
-    dest: "{{ sealing_keys_dir }}/{{ org_id }}-{{ env_name }}.yaml"
-    mode: "0600"
-  delegate_to: localhost
-  become: false
-  diff: false
+  register: vault_sealing_versions
   no_log: true
+
+# One page of 100 versions: about eight years of monthly keys.
+- name: Fail when the sealing keys no longer fit in one page
+  ansible.builtin.assert:
+    that: vault_sealing_versions.json.total_count | int <= 100
+    fail_msg: >-
+      {{ vault_entries.sealing_keys }} has {{ vault_sealing_versions.json.total_count }}
+      versions: list them page by page before adding more (MAIR-617).
+
+- name: Check the local sealing key backup of MAIR-599
+  ansible.builtin.stat:
+    path: "{{ legacy_sealing_keys_dir }}/{{ org_id }}-{{ env_name }}.yaml"
+  delegate_to: localhost
+  become: false
+  register: legacy_sealing_key_file
+
+- name: Read the local sealing key backup of MAIR-599
+  ansible.builtin.slurp:
+    src: "{{ legacy_sealing_key_file.stat.path }}"
+  delegate_to: localhost
+  become: false
+  register: legacy_sealing_key
+  when: legacy_sealing_key_file.stat.exists
+  no_log: true
+
+- name: Plan the versions of the sealing keys
+  ansible.builtin.set_fact:
+    vault_writes: >-
+      {{ (sealing_key.stdout | from_json)['items']
+         | vault_sealing_key_writes(
+             legacy_sealing_items,
+             vault_sealing_versions.json.versions | map(attribute='description') | list,
+             vault_entries.sealing_keys) }}
+  vars:
+    legacy_sealing_items: >-
+      {{ ((legacy_sealing_key.content | b64decode | from_yaml)['items'] | default([]))
+         if legacy_sealing_key is not skipped else [] }}
+  no_log: true
+
+- name: Store the new sealing keys in the vault
+  ansible.builtin.include_tasks: vault_write.yml
+
+- name: Delete the local sealing key backup of MAIR-599, now in the vault
+  ansible.builtin.file:
+    path: "{{ legacy_sealing_key_file.stat.path }}"
+    state: absent
+  delegate_to: localhost
+  become: false
+  when: legacy_sealing_key_file.stat.exists
 
 # --- Summary -------------------------------------------------------------------
 
@@ -510,18 +560,17 @@
   ansible.builtin.debug:
     msg:
       - "Secrets of {{ org_id }}/{{ env_name }} sealed."
-      - "RESTIC_PASSWORD ({{ generated_sources.restic_password }}): {{ restic_file }} (store it in the team vault)"
+      - "RESTIC_PASSWORD ({{ generated_sources.restic_password }}): vault {{ vault_path }}/{{ vault_entries.restic_password }}"
       - "{{ admin_first_login_line[generated_sources.admin_password] }}"
+      - "Sealing keys: vault {{ vault_path }}/{{ vault_entries.sealing_keys }}, one version per key"
       - "Written: {{ deploiment_local_path }}/{{ instance_dir }}/secrets.yaml"
-      - "Sealing key: {{ sealing_keys_dir }}/{{ org_id }}-{{ env_name }}.yaml (store it in the team vault)"
       - "Argo CD deploys them once pushed to {{ deploiment_repo_branch }}:"
       - "  cd {{ deploiment_local_path }} && git add {{ instance_dir }}/secrets.yaml && git commit -m 'chore({{ env_name }}): seal secrets' && git push"
       - "{{ env_name }} follows the branch {{ deploiment_env_revisions[env_name] | default(deploiment_repo_branch) }}: unless that is {{ deploiment_repo_branch }}, promote the commit with the Promote workflow of Deploiment."
   vars:
-    admin_file: "{{ operator_backup_dir }}/admin-{{ org_id }}-{{ env_name }}.txt"
-    restic_file: "{{ operator_backup_dir }}/restic-{{ org_id }}-{{ env_name }}.txt"
+    admin_entry: "vault {{ vault_path }}/{{ vault_entries.admin_password }}"
     admin_first_login_line:
-      cluster: "ADMIN_PASSWORD: argon2id hash kept from the instance; its plaintext is in {{ admin_file }} if a previous run backed it up"
-      cluster-plaintext: "ADMIN_PASSWORD: plaintext sealed before MAIR-414, now sealed as its hash; plaintext backed up in {{ admin_file }}"
-      backup: "ADMIN_PASSWORD (first login of the admin account): from {{ admin_file }}"
-      generated: "ADMIN_PASSWORD (first login of the admin account): generated, in {{ admin_file }} (store it in the team vault)"
+      cluster: "ADMIN_PASSWORD: argon2id hash kept from the instance; its plaintext is in {{ admin_entry }} if a previous run stored it"
+      cluster-plaintext: "ADMIN_PASSWORD: plaintext sealed before MAIR-414, now sealed as its hash; plaintext stored in {{ admin_entry }}"
+      backup: "ADMIN_PASSWORD (first login of the admin account): from {{ admin_entry }}"
+      generated: "ADMIN_PASSWORD (first login of the admin account): generated, stored in {{ admin_entry }}"

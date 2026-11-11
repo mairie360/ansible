@@ -27,7 +27,7 @@ SECRET_NAME = re.compile(
     re.IGNORECASE,
 )
 # Names that match SECRET_NAME but only hold paths or existence checks.
-SAFE_NAMES = {"argocd_initial_secret", "sealing_keys_dir", "local_instance_dir"}
+SAFE_NAMES = {"argocd_initial_secret", "legacy_sealing_keys_dir", "local_instance_dir"}
 # Files that are secret when read (slurp).
 SECRET_FILE = re.compile(r"(private|k3s\.yaml|kube|secret|token|password|sealing)", re.IGNORECASE)
 # Templates rendered with a secret inside.
@@ -110,6 +110,17 @@ def problems(task, sensitive):
         out.append("copy of a secret content without no_log")
     if module == "template" and pathlib.Path(str(args.get("src", ""))).name in SECRET_TEMPLATES and not no_log:
         out.append("template embedding a secret without no_log")
+    # MAIR-617: a call to the vault carries the operator's API key in its
+    # headers, and its result may hold a secret version.
+    headers = args.get("headers") or {}
+    if module == "uri" and (
+        any(re.search(r"token|auth", str(h), re.IGNORECASE) for h in headers)
+        or secret_vars(headers, sensitive)
+    ):
+        if reg:
+            sensitive.add(reg)
+        if not no_log:
+            out.append("uri call with a secret header without no_log")
     if module in ("shell", "command") and reg and SECRET_NAME.search(reg) and reg not in SAFE_NAMES:
         sensitive.add(reg)
         if not no_log:
