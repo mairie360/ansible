@@ -53,14 +53,14 @@ deploiment_local_path: "{{ playbook_dir }}/../../Deploiment"
 #                    ones, a single version would outgrow Secret Manager's
 #                    64 KiB. Without them, a reinstall makes every committed
 #                    secrets.yaml of the instance undecryptable.
-# The secrets themselves are created by Terraform (mairie360/terraform,
+# The secrets themselves are created by Terraform (mairie360/Infra,
 # modules/instance), never by hand and never by this role: the role only adds
 # versions, and fails when a secret is missing.
 vault_region: fr-par
 vault_api_url: "https://api.scaleway.com/secret-manager/v1beta1/regions/{{ vault_region }}"
-# Same path as modules/instance of mairie360/terraform.
+# Same path as modules/instance of mairie360/Infra.
 vault_path: "/{{ org_id }}/{{ env_name }}"
-# Secret names, same as modules/instance of mairie360/terraform.
+# Secret names, same as modules/instance of mairie360/Infra.
 vault_entries:
   restic_password: restic-password
   admin_password: admin-password

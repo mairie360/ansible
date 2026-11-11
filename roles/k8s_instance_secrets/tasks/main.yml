@@ -26,7 +26,7 @@
 #      the instance sealing keys the vault does not have yet (one version per
 #      key).
 #
-# The vault's secrets are created by Terraform (mairie360/terraform), never by
+# The vault's secrets are created by Terraform (mairie360/Infra), never by
 # this role: it fails before sealing when one is missing. Nothing secret is
 # written on the workstation.
 #

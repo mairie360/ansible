@@ -359,7 +359,7 @@ project of the group (`vault_project_id`, see below):
 | `sealing-keys` | one version per sealing key of the instance (the controller adds one every 30 days) | every committed `secrets.yaml`, after a reinstall |
 
 **The role never creates a secret.** Terraform does, from
-[`mairie360/terraform`](https://github.com/mairie360/terraform) (`orgs/<org>`,
+[`mairie360/Infra`](https://github.com/mairie360/Infra) (`orgs/<org>`,
 protected secrets that cannot be deleted by mistake); the role only looks them
 up, adds versions and reads them. When one is missing the play stops before
 sealing anything and asks for `terraform apply`. Nothing secret is written on
