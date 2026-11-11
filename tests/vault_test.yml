@@ -1,0 +1,257 @@
+---
+# Non-regression test of MAIR-617, on localhost, no Scaleway account touched:
+#
+#   ansible-playbook tests/vault_test.yml
+#
+# Runs the vault tasks of role k8s_instance_secrets for real, against a local
+# stand-in of the Secret Manager API (tests/mock_secret_manager.py):
+#   - credentials: environment, then scw CLI profile, vault_project_id first;
+#     none at all stops the play;
+#   - the secrets are looked up, never created: a missing one stops the play
+#     and asks for `terraform apply`; a wrong API key stops it too;
+#   - the latest version is read, '' when a secret has none;
+#   - versions are written then read back, archives before the final value;
+#   - one version per sealing key, nothing added on a second run.
+# The pure decisions are unit-tested by tests/test_vault_filters.py.
+
+- name: MAIR-617 vault credentials
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    scw_config_sample:
+      secret_key: top-level-key
+      default_project_id: top-level-project
+      active_profile: team
+      profiles:
+        team: {secret_key: team-key, default_project_id: team-project}
+        other: {secret_key: other-key, default_project_id: other-project}
+    auth_cases:
+      - name: the environment wins over the scw profile
+        env: {secret_key: env-key, project_id: env-project, profile: ""}
+        config: "{{ scw_config_sample }}"
+        project: ""
+        expected: {secret_key: env-key, project_id: env-project}
+      - name: the active scw profile is used without environment
+        env: {secret_key: "", project_id: "", profile: ""}
+        config: "{{ scw_config_sample }}"
+        project: ""
+        expected: {secret_key: team-key, project_id: team-project}
+      - name: SCW_PROFILE selects another profile
+        env: {secret_key: "", project_id: "", profile: other}
+        config: "{{ scw_config_sample }}"
+        project: ""
+        expected: {secret_key: other-key, project_id: other-project}
+      - name: the top level of the configuration is used without profile
+        env: {secret_key: "", project_id: "", profile: ""}
+        config: {secret_key: top-level-key, default_project_id: top-level-project}
+        project: ""
+        expected: {secret_key: top-level-key, project_id: top-level-project}
+      - name: vault_project_id wins over everything
+        env: {secret_key: env-key, project_id: env-project, profile: ""}
+        config: "{{ scw_config_sample }}"
+        project: inventory-project
+        expected: {secret_key: env-key, project_id: inventory-project}
+  tasks:
+    - name: Resolve the credentials
+      ansible.builtin.include_tasks: tasks/vault_auth_case.yml
+      loop: "{{ auth_cases }}"
+      loop_control:
+        loop_var: case
+        label: "{{ case.name }}"
+
+    - name: No credentials at all stops the play
+      block:
+        - name: Resolve without any credentials
+          ansible.builtin.include_role:
+            name: k8s_instance_secrets
+            tasks_from: vault_auth_resolve.yml
+          vars:
+            scw_env: {secret_key: "", project_id: "", profile: ""}
+            scw_config: {}
+
+        - name: Not reached
+          ansible.builtin.fail:
+            msg: resolved without credentials
+      rescue:
+        - name: The play stops with the setup instructions
+          ansible.builtin.assert:
+            that: ansible_failed_result.msg is search('scw init')
+
+- name: MAIR-617 vault calls
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    mock_port: 18617
+    org_id: mairie360
+    env_name: dev
+    vault_api_url: "http://127.0.0.1:{{ mock_port }}/secret-manager/v1beta1/regions/fr-par"
+  tasks:
+    # A fact, so that it replaces the one the previous play left.
+    - name: Use the stand-in's API key
+      ansible.builtin.set_fact:
+        vault_auth: {secret_key: test-api-key, project_id: test-project}
+
+    - name: Create the test directory
+      ansible.builtin.tempfile:
+        state: directory
+        suffix: mair617
+      register: test_dir
+
+    - name: Seed the stand-in vault
+      ansible.builtin.copy:
+        dest: "{{ test_dir.path }}/state.json"
+        mode: "0600"
+        content: |
+          {"secrets": [
+            {"id": "id-restic", "name": "restic-password", "path": "/mairie360/dev", "project_id": "test-project", "versions": []},
+            {"id": "id-admin", "name": "admin-password", "path": "/mairie360/dev", "project_id": "test-project",
+             "versions": [{"revision": 1, "data": "{{ 'admin-in-vault' | b64encode }}", "description": "seed"}]},
+            {"id": "id-keys", "name": "sealing-keys", "path": "/mairie360/dev", "project_id": "test-project", "versions": []},
+            {"id": "id-prod", "name": "restic-password", "path": "/mairie360/prod", "project_id": "test-project", "versions": []}
+          ]}
+
+    - name: Start the stand-in Secret Manager
+      ansible.builtin.command: >-
+        python3 {{ playbook_dir }}/mock_secret_manager.py --port {{ mock_port }}
+        --token test-api-key --state {{ test_dir.path }}/state.json
+      async: 600
+      poll: 0
+      changed_when: false
+
+    - name: Wait for the stand-in Secret Manager
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: "{{ mock_port }}"
+        timeout: 20
+
+    - name: Run the vault tasks against it
+      block:
+        # public: the role's defaults (vault_entries) and filters are used below.
+        - name: Find the instance's secrets
+          ansible.builtin.include_role:
+            name: k8s_instance_secrets
+            tasks_from: vault_index.yml
+            public: true
+
+        - name: The three secrets of the instance are found, not the other instance's
+          ansible.builtin.assert:
+            that: >-
+              vault_ids == {'restic-password': 'id-restic', 'admin-password': 'id-admin', 'sealing-keys': 'id-keys'}
+            fail_msg: "{{ vault_ids | to_json }}"
+
+        - name: Read the generated secrets
+          ansible.builtin.include_role:
+            name: k8s_instance_secrets
+            tasks_from: vault_read.yml
+
+        - name: A secret without version reads as empty
+          ansible.builtin.assert:
+            that: >-
+              vault_values == {'restic_password': '', 'admin_password': 'admin-in-vault'}
+            fail_msg: "{{ vault_values | to_json }}"
+
+        - name: Plan a new RESTIC_PASSWORD with a legacy copy to archive
+          ansible.builtin.set_fact:
+            vault_writes: >-
+              {{ vault_values | vault_generated_writes(
+                   {'restic_password': 'restic-sealed'},
+                   [{'key': 'restic_password', 'content': 'restic-old', 'source': 'workstation:restic.txt~'}],
+                   vault_entries, 'sealed on mairie360/dev') }}
+
+        - name: Write and read back
+          ansible.builtin.include_role:
+            name: k8s_instance_secrets
+            tasks_from: vault_write.yml
+
+        - name: Read the stand-in state
+          ansible.builtin.set_fact:
+            vault_state: "{{ lookup('ansible.builtin.file', test_dir.path ~ '/state.json') | from_json }}"
+
+        - name: The archive comes first, the sealed value is the latest
+          ansible.builtin.assert:
+            that:
+              - restic.versions | map(attribute='data') | map('b64decode') | list == ['restic-old', 'restic-sealed']
+              - restic.versions[0].description is search('archived workstation:restic.txt~')
+              - admin.versions | length == 1
+            fail_msg: "{{ vault_state | to_json }}"
+          vars:
+            restic: "{{ vault_state.secrets | selectattr('id', 'equalto', 'id-restic') | first }}"
+            admin: "{{ vault_state.secrets | selectattr('id', 'equalto', 'id-admin') | first }}"
+
+        - name: Read the generated secrets again
+          ansible.builtin.include_role:
+            name: k8s_instance_secrets
+            tasks_from: vault_read.yml
+
+        - name: The latest version is read
+          ansible.builtin.assert:
+            that: vault_values.restic_password == 'restic-sealed'
+
+        - name: Upload the sealing keys twice
+          ansible.builtin.include_tasks: tasks/vault_sealing_keys_run.yml
+          loop: [first, second]
+          loop_control:
+            loop_var: run
+
+        - name: Read the stand-in state
+          ansible.builtin.set_fact:
+            vault_state: "{{ lookup('ansible.builtin.file', test_dir.path ~ '/state.json') | from_json }}"
+
+        - name: One version per key, none added by the second run
+          ansible.builtin.assert:
+            that:
+              - keys.versions | map(attribute='description') | list == ['sealed-secrets-key1', 'sealed-secrets-key2']
+              - (keys.versions[0].data | b64decode | from_yaml).metadata.name == 'sealed-secrets-key1'
+            fail_msg: "{{ keys.versions | map(attribute='description') | list | to_json }}"
+          vars:
+            keys: "{{ vault_state.secrets | selectattr('id', 'equalto', 'id-keys') | first }}"
+
+        - name: An instance whose secrets Terraform did not create stops the play
+          block:
+            - name: Find the secrets of an instance missing from the vault
+              ansible.builtin.include_role:
+                name: k8s_instance_secrets
+                tasks_from: vault_index.yml
+              vars:
+                env_name: prod
+
+            - name: Not reached
+              ansible.builtin.fail:
+                msg: missing secrets accepted
+          rescue:
+            - name: The play asks for terraform apply, and names what is missing
+              ansible.builtin.assert:
+                that:
+                  - ansible_failed_result.msg is search('terraform apply')
+                  - ansible_failed_result.msg is search('admin-password, sealing-keys')
+                fail_msg: "{{ ansible_failed_result.msg }}"
+
+        - name: A wrong API key stops the play
+          block:
+            - name: Find the secrets with a wrong API key
+              ansible.builtin.include_role:
+                name: k8s_instance_secrets
+                tasks_from: vault_index.yml
+              vars:
+                vault_auth: {secret_key: wrong-key, project_id: test-project}
+
+            - name: Not reached
+              ansible.builtin.fail:
+                msg: wrong API key accepted
+          rescue:
+            - name: The vault refused the call
+              ansible.builtin.assert:
+                that: ansible_failed_result.msg is not search('Not reached|accepted')
+                fail_msg: "{{ ansible_failed_result.msg }}"
+      always:
+        - name: Stop the stand-in Secret Manager
+          ansible.builtin.command: pkill -f "mock_secret_manager.py --port {{ mock_port }}"
+          changed_when: false
+          failed_when: false
+
+        - name: Remove the test directory
+          ansible.builtin.file:
+            path: "{{ test_dir.path }}"
+            state: absent

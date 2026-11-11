@@ -1,0 +1,15 @@
+---
+# One case of tests/vault_test.yml: resolves the vault credentials from `case`.
+- name: "Resolve the credentials: {{ case.name }}"
+  ansible.builtin.include_role:
+    name: k8s_instance_secrets
+    tasks_from: vault_auth_resolve.yml
+  vars:
+    scw_env: "{{ case.env }}"
+    scw_config: "{{ case.config }}"
+    vault_project_id: "{{ case.project }}"
+
+- name: "Check the credentials: {{ case.name }}"
+  ansible.builtin.assert:
+    that: vault_auth == case.expected
+    fail_msg: "{{ case.name }}: {{ vault_auth | to_json }}"

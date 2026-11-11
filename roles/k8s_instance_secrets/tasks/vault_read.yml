@@ -1,0 +1,25 @@
+---
+# Latest enabled version of RESTIC_PASSWORD and of the admin account's first
+# password in the vault (MAIR-617). A secret without any version yet answers
+# 404. Sets vault_values {restic_password, admin_password}, '' when absent.
+- name: Read the generated secrets stored in the vault
+  ansible.builtin.uri:
+    url: "{{ vault_api_url }}/secrets/{{ vault_ids[vault_entries[item]] }}/versions/latest_enabled/access"
+    headers:
+      X-Auth-Token: "{{ vault_auth.secret_key }}"
+    status_code: [200, 404]
+    return_content: true
+  loop: [restic_password, admin_password]
+  delegate_to: localhost
+  become: false
+  register: vault_reads
+  no_log: true
+
+- name: Keep the generated secrets stored in the vault
+  ansible.builtin.set_fact:
+    vault_values: >-
+      {{ dict(vault_reads.results | map(attribute='item')
+              | zip(vault_reads.results
+                    | map(attribute='json', default={}) | map(attribute='data', default='')
+                    | map('b64decode'))) }}
+  no_log: true

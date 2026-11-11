@@ -1,0 +1,51 @@
+---
+# =============================================================================
+# Adds versions to the vault, then reads each one back (MAIR-617)
+#
+# Input: vault_writes, [{entry: secret name, content, description}], planned
+# by the vault_* filters (filter_plugins/vault.py). A version read back with
+# other data than written fails the play: the files it replaces are only
+# deleted after this.
+# =============================================================================
+
+- name: Add the versions to the vault
+  ansible.builtin.uri:
+    url: "{{ vault_api_url }}/secrets/{{ vault_ids[item.entry] }}/versions"
+    method: POST
+    headers:
+      X-Auth-Token: "{{ vault_auth.secret_key }}"
+    body_format: json
+    body:
+      data: "{{ item.content | b64encode }}"
+      description: "{{ item.description }}"
+  loop: "{{ vault_writes }}"
+  delegate_to: localhost
+  become: false
+  register: vault_written
+  no_log: true
+
+- name: Read the new versions back from the vault
+  ansible.builtin.uri:
+    url: "{{ vault_api_url }}/secrets/{{ vault_ids[item.item.entry] }}/versions/{{ item.json.revision }}/access"
+    headers:
+      X-Auth-Token: "{{ vault_auth.secret_key }}"
+    return_content: true
+  loop: "{{ vault_written.results | default([]) }}"
+  delegate_to: localhost
+  become: false
+  register: vault_readback
+  no_log: true
+
+# Descriptions only: names of keys and of archived files, no secret.
+- name: Fail when a version read back differs from what was written
+  ansible.builtin.assert:
+    that: vault_mismatches | length == 0
+    quiet: true
+    fail_msg: "Read back with other data than written: {{ vault_mismatches | join(', ') }}"
+  vars:
+    vault_mismatches: "{{ vault_readback.results | default([]) | vault_readback_mismatches }}"
+
+- name: Versions added to the vault
+  ansible.builtin.debug:
+    msg: "{{ vault_writes | map(attribute='entry') | zip(vault_writes | map(attribute='description')) | map('join', ': ') | list }}"
+  when: vault_writes | length > 0
