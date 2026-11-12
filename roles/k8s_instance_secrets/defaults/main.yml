@@ -71,14 +71,19 @@ vault_entries:
 #      scw CLI profile; SCW_SECRET_KEY, else the scw CLI profile;
 #   2. the scw CLI profile is SCW_PROFILE, else active_profile, else the top
 #      level of scw_config_file (`scw init` writes it).
+# scw_config_file is found like the scw CLI does: SCW_CONFIG_PATH, else
+# $XDG_CONFIG_HOME/scw/config.yaml, else ~/.config/scw/config.yaml.
 vault_project_id: ""
 scw_env:
   secret_key: "{{ lookup('ansible.builtin.env', 'SCW_SECRET_KEY') }}"
   project_id: "{{ lookup('ansible.builtin.env', 'SCW_DEFAULT_PROJECT_ID') }}"
   profile: "{{ lookup('ansible.builtin.env', 'SCW_PROFILE') }}"
+  config_path: "{{ lookup('ansible.builtin.env', 'SCW_CONFIG_PATH') }}"
+  xdg_config_home: "{{ lookup('ansible.builtin.env', 'XDG_CONFIG_HOME') }}"
+  home: "{{ lookup('ansible.builtin.env', 'HOME') }}"
 scw_config_file: >-
-  {{ lookup('ansible.builtin.env', 'SCW_CONFIG_PATH')
-     | default(lookup('ansible.builtin.env', 'HOME') ~ '/.config/scw/config.yaml', true) }}
+  {{ scw_env.config_path
+     or ((scw_env.xdg_config_home or (scw_env.home ~ '/.config')) ~ '/scw/config.yaml') }}
 
 # --- Local backups of MAIR-599, migrated then deleted (MAIR-617) --------------
 # Before MAIR-617 the role kept restic-<org>-<env>.txt, admin-<org>-<env>.txt

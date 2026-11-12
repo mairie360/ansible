@@ -65,32 +65,34 @@ def vault_legacy_files(slurped, prefixes, org, env, origin):
     return {"exact": exact, "candidates": candidates}
 
 
+ARCHIVE_PREFIX = "MAIR-617 archived "
+
+
 def vault_generated_writes(vault_values, finals, candidates, entries, label):
     """Versions to add for the generated secrets, in order.
 
-    vault_values  {key: latest enabled version in the vault, '' when none};
-    finals        {key: value that must be the latest version}: the values
-                  sealed on the instance (generated_backup_writes); a key is
-                  absent when nothing has to be written (admin hash on the
-                  instance);
+    vault_values  {key: current version in the vault, '' when none};
+    finals        {key: value that must be the current version}: the values
+                  sealed on the instance, or the plaintext known for an admin
+                  hash (resolve_generated.yml); a key is absent when nothing
+                  has to be written;
     candidates    [{key, content, source}]: legacy files and leftovers;
     entries       {key: secret name in the vault}.
 
-    Every candidate whose content is not already the latest (or about to be)
-    is archived as its own version first, so that no copy is lost before the
-    files are deleted. Then the final value is written when it differs from
-    the vault, or written again after archives so that it stays the latest.
-    When there is no final value but archives were added, the previous latest
-    is written again for the same reason.
+    Every candidate whose content is neither the current value nor the final
+    one is stored first as an archive (`archive: True`, description
+    ARCHIVE_PREFIX + its origin), so that no copy is lost before the files are
+    deleted. vault_write.yml disables the archives, and vault_current_revisions
+    never picks one: an archive never becomes the current value, even when the
+    run stops before the final value is written. The final value comes last,
+    only when it differs from the vault.
     """
     writes = []
     keys = sorted(set(vault_values) | set(finals) | {c["key"] for c in candidates})
     for key in keys:
         current = vault_values.get(key, "")
         final = finals.get(key)
-        latest = final if final is not None else current
-        seen = {latest, current, ""}
-        archives = []
+        seen = {final, current, ""}
         for candidate in candidates:
             if candidate["key"] != key:
                 continue
@@ -98,17 +100,36 @@ def vault_generated_writes(vault_values, finals, candidates, entries, label):
             if content in seen:
                 continue
             seen.add(content)
-            archives.append({
+            writes.append({
                 "entry": entries[key],
                 "content": content,
-                "description": f"MAIR-617 archived {candidate['source']}",
+                "description": ARCHIVE_PREFIX + candidate["source"],
+                "archive": True,
             })
-        writes.extend(archives)
-        if final is not None and (final != current or archives):
-            writes.append({"entry": entries[key], "content": final, "description": f"MAIR-617 {label}"})
-        elif final is None and archives and current:
-            writes.append({"entry": entries[key], "content": current, "description": "MAIR-617 latest kept after archiving"})
+        if final is not None and final != current:
+            writes.append({"entry": entries[key], "content": final, "description": f"MAIR-617 {label}", "archive": False})
     return writes
+
+
+def vault_current_revisions(listed, keys):
+    """{key: revision of the current version, or None} from the version lists.
+
+    `listed` are the results of the list loop (item = key, json.versions =
+    [{revision, status, description}]). The current version is the newest
+    enabled one that is not an archive: an archive written by a run that
+    stopped before disabling it is skipped too.
+    """
+    by_key = {result.get("item"): result for result in listed or []}
+    current = {}
+    for key in keys:
+        versions = (by_key.get(key, {}).get("json") or {}).get("versions") or []
+        usable = [
+            v["revision"] for v in versions
+            if v.get("status", "enabled") == "enabled"
+            and not (v.get("description") or "").startswith(ARCHIVE_PREFIX)
+        ]
+        current[key] = max(usable) if usable else None
+    return current
 
 
 def sealing_key_manifest(secret):
@@ -178,6 +199,7 @@ class FilterModule:
             "vault_missing": vault_missing,
             "vault_legacy_files": vault_legacy_files,
             "vault_generated_writes": vault_generated_writes,
+            "vault_current_revisions": vault_current_revisions,
             "vault_sealing_key_writes": vault_sealing_key_writes,
             "vault_readback_mismatches": vault_readback_mismatches,
         }

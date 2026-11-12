@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
 """Local stand-in for the Scaleway Secret Manager API (MAIR-617 tests).
 
-Serves the four calls the role k8s_instance_secrets makes, on 127.0.0.1,
-from a JSON state file it rewrites after every write:
+Serves the calls the role k8s_instance_secrets makes, on 127.0.0.1, from a
+JSON state file it rewrites after every write:
 
     GET  /secret-manager/v1beta1/regions/<r>/secrets?project_id=&path=
     GET  /secret-manager/v1beta1/regions/<r>/secrets/<id>/versions
     GET  /secret-manager/v1beta1/regions/<r>/secrets/<id>/versions/<rev>/access
     POST /secret-manager/v1beta1/regions/<r>/secrets/<id>/versions
+    POST /secret-manager/v1beta1/regions/<r>/secrets/<id>/versions/<rev>/disable
 
 State: {"secrets": [{"id", "name", "path", "project_id",
-                     "versions": [{"revision", "data" (base64), "description"}]}]}
+                     "versions": [{"revision", "data" (base64), "description",
+                                   "status" (enabled | disabled, default enabled)}]}]}
 Requests without the expected X-Auth-Token get 401, like the real API.
 
     python3 tests/mock_secret_manager.py --port 18617 --token t --state state.json
@@ -78,7 +80,7 @@ def make_handler(token, state_path):
                 if not secret:
                     return self.reply(404, {"message": "resource is not found"})
                 versions = [
-                    {"revision": v["revision"], "description": v["description"], "status": "enabled"}
+                    {"revision": v["revision"], "description": v["description"], "status": v.get("status", "enabled")}
                     for v in secret["versions"]
                 ]
                 return self.reply(200, {"versions": versions, "total_count": len(versions)})
@@ -87,8 +89,11 @@ def make_handler(token, state_path):
                 secret = self.secret(state, m.group(1))
                 versions = secret["versions"] if secret else []
                 revision = m.group(2)
-                if revision in ("latest", "latest_enabled"):
+                if revision == "latest":
                     version = versions[-1] if versions else None
+                elif revision == "latest_enabled":
+                    enabled = [v for v in versions if v.get("status", "enabled") == "enabled"]
+                    version = enabled[-1] if enabled else None
                 else:
                     version = next((v for v in versions if str(v["revision"]) == revision), None)
                 if not version:
@@ -100,10 +105,21 @@ def make_handler(token, state_path):
             if not self.authorized():
                 return
             url = urlparse(self.path)
+            body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
+            d = re.match(PREFIX + r"/([^/]+)/versions/([0-9]+)/disable$", url.path)
+            if d:
+                with LOCK:
+                    state = load()
+                    secret = self.secret(state, d.group(1))
+                    version = next((v for v in (secret or {}).get("versions", []) if str(v["revision"]) == d.group(2)), None)
+                    if not version:
+                        return self.reply(404, {"message": "resource is not found"})
+                    version["status"] = "disabled"
+                    save(state)
+                return self.reply(200, {"secret_id": secret["id"], "revision": version["revision"], "status": "disabled"})
             m = re.match(PREFIX + r"/([^/]+)/versions$", url.path)
             if not m:
                 return self.reply(404, {"message": "unknown route"})
-            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             with LOCK:
                 state = load()
                 secret = self.secret(state, m.group(1))

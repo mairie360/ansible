@@ -390,11 +390,11 @@ any credentials the play stops and asks for `scw init`.
 scw secret secret list path=/mairie360/dev name=admin-password -o json | jq -r '.[0].id'
 scw secret version access <secret-id> revision=latest_enabled raw=true
 
-# Restore the sealing keys on a reinstalled instance, BEFORE Argo CD syncs
-# the sealed-secrets controller (it would generate a new key otherwise):
-for rev in $(scw secret version list <sealing-keys-id> -o json | jq -r '.[].revision'); do
-  scw secret version access <sealing-keys-id> revision="$rev" raw=true | kubectl apply -f -
-done
+# Restore the sealing keys of a reinstalled instance, BEFORE Argo CD syncs its
+# sealed-secrets controller (it would generate a new key otherwise). From the
+# workstation; kubectl runs on the group's Argo CD machine over SSH, with
+# /root/.kube/instance-<env>.yaml. Stops at the first failure.
+scripts/restore-sealing-keys.sh mairie360 dev root@<argocd machine>
 ```
 
 **Migration from MAIR-599.** Runs before MAIR-617 kept the values in
@@ -404,7 +404,8 @@ and `.<pid>.<date>~` older copies), and runs before MAIR-599 left admin
 plaintexts on the Argo CD machine (`/root/.mairie360/admin-<org>-<env>.txt*`).
 The role finds the files of its own instance in both places, adds each
 distinct older value as an archived version (description `MAIR-617 archived
-<origin>:<file>`), then the current value as the latest one, reads them back,
+<origin>:<file>`, disabled right after, so `latest_enabled` is never an
+archive), then the current value when it changes, reads them back,
 and only then deletes the files. It runs once per instance:
 `playbooks/secrets.yml --limit <host>` changes no sealed value; commit the
 resulting `secrets.yaml` as usual (its ciphertext changes on every run, its
@@ -440,6 +441,7 @@ ansible-playbook tests/gdpr_gaps_test.yml   # the GDPR gaps of verify.yml, on lo
 ansible-playbook tests/image_updater_test.yml   # no ImageUpdater in prod, git write-back for dev/staging
 ansible-playbook tests/seal_passwords_test.yml  # MAIR-599: generated secrets resolution, Resend key at the first sealing
 python3 -m unittest tests/test_vault_filters.py  # MAIR-617: what is written to the vault
+bash tests/restore_sealing_keys_test.sh          # MAIR-617: sealing keys restore (scw, ssh stubbed)
 ansible-playbook tests/vault_test.yml           # MAIR-617: the vault tasks against a local stand-in of Secret Manager
 python3 tests/check_image_updater_services.py ../Deploiment  # image_updater_services = services deployed by Deploiment
 ansible-lint                                    # pre-existing violations: .ansible-lint, .ansible-lint-ignore

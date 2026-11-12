@@ -119,17 +119,60 @@ class GeneratedWrites(unittest.TestCase):
         self.assertIn("archived workstation:restic.txt~", writes[0]["description"])
         self.assertEqual(writes[-1]["description"], "MAIR-617 sealed on mairie360/dev")
 
-    def test_latest_is_written_again_after_archiving(self):
-        # The vault already holds the value kept; an older copy is archived,
-        # then the value is written again so that it stays the latest.
+    def test_archives_are_flagged_and_the_current_value_not_rewritten(self):
+        # The vault already holds the value kept; an older copy is archived
+        # (disabled by vault_write.yml), the current value is not written
+        # again: archives never count as current (vault_current_revisions).
         candidates = [{"key": "admin_password", "content": "leftover", "source": "argocd:admin.txt.2026"}]
         writes = self.plan({"restic_password": "r", "admin_password": "a"}, {"restic_password": "r"}, candidates)
-        self.assertEqual([(w["entry"], w["content"]) for w in writes], [("admin-password", "leftover"), ("admin-password", "a")])
+        self.assertEqual([(w["entry"], w["content"], w["archive"]) for w in writes], [("admin-password", "leftover", True)])
+        self.assertTrue(writes[0]["description"].startswith(vault.ARCHIVE_PREFIX))
+
+    def test_final_value_is_last_and_not_an_archive(self):
+        candidates = [{"key": "restic_password", "content": "r0", "source": "workstation:restic.txt~"}]
+        writes = self.plan({"restic_password": "", "admin_password": ""}, {"restic_password": "r1"}, candidates)
+        self.assertEqual([(w["content"], w["archive"]) for w in writes], [("r0", True), ("r1", False)])
+
+    def test_admin_hash_keeps_the_plain_copy_current_not_an_older_one(self):
+        # CodeRabbit on ansible#61: instance holds the admin hash, vault empty,
+        # the plain-named copy and an older suffixed one. resolve_generated.yml
+        # now passes the plain copy as the final value: it is written last,
+        # the older copy only archived.
+        candidates = [
+            {"key": "admin_password", "content": "a1", "source": "workstation:admin.txt"},
+            {"key": "admin_password", "content": "a0", "source": "workstation:admin.txt.20260101~"},
+        ]
+        writes = self.plan({"restic_password": "r", "admin_password": ""}, {"restic_password": "r", "admin_password": "a1"}, candidates)
+        self.assertEqual([(w["content"], w["archive"]) for w in writes], [("a0", True), ("a1", False)])
 
     def test_instance_value_replaces_a_different_vault_value_and_keeps_it_as_history(self):
         # The instance wins: the vault's old value stays as the previous version.
         writes = self.plan({"restic_password": "vault", "admin_password": ""}, {"restic_password": "cluster"})
         self.assertEqual([(w["entry"], w["content"]) for w in writes], [("restic-password", "cluster")])
+
+
+class CurrentRevisions(unittest.TestCase):
+    def listed(self, key, versions):
+        return {"item": key, "json": {"versions": versions}}
+
+    def test_newest_enabled_non_archive_is_current(self):
+        listed = [self.listed("restic_password", [
+            {"revision": 1, "status": "enabled", "description": "MAIR-617 sealed on mairie360/dev"},
+            {"revision": 2, "status": "disabled", "description": "MAIR-617 sealed on mairie360/dev"},
+            # CodeRabbit on ansible#61: an archive left enabled by a run that
+            # stopped before writing the current value must not be read.
+            {"revision": 3, "status": "enabled", "description": vault.ARCHIVE_PREFIX + "workstation:restic.txt~"},
+        ])]
+        self.assertEqual(vault.vault_current_revisions(listed, ["restic_password", "admin_password"]),
+                         {"restic_password": 1, "admin_password": None})
+
+    def test_no_version_or_only_archives_is_none(self):
+        listed = [
+            self.listed("restic_password", []),
+            self.listed("admin_password", [{"revision": 1, "status": "enabled", "description": vault.ARCHIVE_PREFIX + "x"}]),
+        ]
+        self.assertEqual(vault.vault_current_revisions(listed, ["restic_password", "admin_password"]),
+                         {"restic_password": None, "admin_password": None})
 
 
 class SealingKeyWrites(unittest.TestCase):

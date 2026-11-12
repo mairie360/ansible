@@ -5,7 +5,8 @@
 # Input: vault_writes, [{entry: secret name, content, description}], planned
 # by the vault_* filters (filter_plugins/vault.py). A version read back with
 # other data than written fails the play: the files it replaces are only
-# deleted after this.
+# deleted after this. Archives (`archive: true`) are then disabled, so that
+# `latest_enabled` (scw CLI, console) is always the current value.
 # =============================================================================
 
 - name: Add the versions to the vault
@@ -44,6 +45,21 @@
     fail_msg: "Read back with other data than written: {{ vault_mismatches | join(', ') }}"
   vars:
     vault_mismatches: "{{ vault_readback.results | default([]) | vault_readback_mismatches }}"
+
+- name: Disable the archived versions
+  ansible.builtin.uri:
+    url: "{{ vault_api_url }}/secrets/{{ vault_ids[item.item.entry] }}/versions/{{ item.json.revision }}/disable"
+    method: POST
+    headers:
+      X-Auth-Token: "{{ vault_auth.secret_key }}"
+    body_format: json
+    body: {}
+  loop: "{{ vault_written.results | default([]) | selectattr('item.archive', 'defined') | selectattr('item.archive') | list }}"
+  loop_control:
+    label: "{{ item.item.description }}"
+  delegate_to: localhost
+  become: false
+  no_log: true
 
 - name: Versions added to the vault
   ansible.builtin.debug:

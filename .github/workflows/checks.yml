@@ -154,3 +154,5 @@ jobs:
         run: python -m unittest tests/test_vault_filters.py -v
       - name: Vault tasks against the stand-in Secret Manager
         run: ansible-playbook tests/vault_test.yml
+      - name: Restore of the sealing keys (scw and ssh stubbed)
+        run: bash tests/restore_sealing_keys_test.sh
