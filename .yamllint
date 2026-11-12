@@ -1,0 +1,33 @@
+---
+# yamllint configuration (MAIR-242), run by .github/workflows/checks.yml.
+# Same style as ansible-lint's own yaml rules (flow braces up to one space,
+# comments indented like the code), so that both agree. Line length is left to
+# ansible-lint (yaml[line-length], 160 columns).
+extends: default
+
+ignore: |
+  .github/
+  inventory/hosts.yml
+
+rules:
+  braces:
+    min-spaces-inside: 0
+    max-spaces-inside: 1
+  brackets:
+    min-spaces-inside: 0
+    max-spaces-inside: 0
+  # Aligned on purpose, listed in .ansible-lint-ignore too (yaml[commas]).
+  commas:
+    ignore: |
+      roles/k8s_argocd/defaults/main.yml
+  comments:
+    min-spaces-from-content: 1
+  comments-indentation: disable
+  document-start: disable
+  line-length: disable
+  octal-values:
+    forbid-implicit-octal: true
+    forbid-explicit-octal: true
+  truthy:
+    allowed-values: ["true", "false"]
+    check-keys: false

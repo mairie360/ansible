@@ -35,14 +35,28 @@
   register: ns_argocd
   changed_when: "'created' in ns_argocd.stdout"
 
+# `kubectl apply --server-side` prints "serverside-applied" for every object,
+# changed or not, so its output cannot tell whether anything changed (MAIR-242).
+# The server-side diff can: exit 0 = the cluster already matches the pinned
+# manifests, 1 = it differs (apply), above 1 = error.
+- name: Compare the cluster with the pinned Argo CD manifests
+  ansible.builtin.command: >
+    kubectl diff -n argocd --server-side --force-conflicts
+    -f https://raw.githubusercontent.com/argoproj/argo-cd/{{ argocd_version }}/manifests/install.yaml
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  register: argocd_diff
+  changed_when: false
+  failed_when: argocd_diff.rc > 1
+
 - name: Installer Argo CD (version épinglée)
   ansible.builtin.command: >
     kubectl apply -n argocd --server-side --force-conflicts
     -f https://raw.githubusercontent.com/argoproj/argo-cd/{{ argocd_version }}/manifests/install.yaml
   environment:
     KUBECONFIG: /etc/rancher/k3s/k3s.yaml
-  register: argocd_apply
-  changed_when: "'configured' in argocd_apply.stdout or 'created' in argocd_apply.stdout"
+  when: argocd_diff.rc == 1
+  changed_when: true
 
 - name: Attendre la disponibilité d'Argo CD
   ansible.builtin.command: >

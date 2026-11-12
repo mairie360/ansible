@@ -1,0 +1,35 @@
+{#- Machine checks of one machine (MAIR-242), rendered by playbooks/verify.yml as a YAML list of
+    {id, message}. Inputs: state (pairs key=value collected on the machine) and the expectations:
+    expected_public_ports (list of "port/proto" open to everyone), expected_k3s_version,
+    expected_cilium_version, expected_swap_mb, expected_wg_peers (0 = none expected),
+    max_handshake_age (seconds). -#}
+{%- set ns = namespace(gaps=[]) -%}
+{%- set s = {} -%}
+{%- set hs = namespace(ages=[]) -%}
+{%- for pair in state if pair | length == 2 -%}
+{%-   if pair[0] == 'wg_handshake_age' -%}{%- set hs.ages = hs.ages + [pair[1] | int] -%}
+{%-   else -%}{%- set _ = s.update({pair[0]: pair[1]}) -%}{%- endif -%}
+{%- endfor -%}
+{%- if s.get('ufw_status') != 'active' -%}{%- set ns.gaps = ns.gaps + [{'id': 'ufw-inactive', 'message': 'UFW is not active (ufw status: ' ~ s.get('ufw_status', 'unknown') ~ ')'}] -%}{%- endif -%}
+{%- if s.get('ufw_default_incoming') != 'deny' -%}{%- set ns.gaps = ns.gaps + [{'id': 'ufw-default-incoming', 'message': 'UFW does not deny incoming traffic by default (default: ' ~ s.get('ufw_default_incoming', 'unknown') ~ ')'}] -%}{%- endif -%}
+{%- set open_ports = (s.get('ufw_public_ports', '') | split(',') | reject('equalto', '') | sort | list) -%}
+{%- set unexpected = open_ports | difference(expected_public_ports) -%}
+{%- set missing = expected_public_ports | difference(open_ports) -%}
+{%- if unexpected | length > 0 -%}{%- set ns.gaps = ns.gaps + [{'id': 'ufw-unexpected-port', 'message': 'ports open to everyone that no role opens: ' ~ unexpected | join(', ')}] -%}{%- endif -%}
+{%- if missing | length > 0 -%}{%- set ns.gaps = ns.gaps + [{'id': 'ufw-missing-port', 'message': 'ports that should be open to everyone and are not: ' ~ missing | join(', ')}] -%}{%- endif -%}
+{%- if expected_wg_peers | int > 0 and hs.ages | length < expected_wg_peers | int -%}
+{%-   set ns.gaps = ns.gaps + [{'id': 'wireguard-peers', 'message': 'wg0 has ' ~ hs.ages | length ~ ' peer(s), ' ~ expected_wg_peers ~ ' expected'}] -%}
+{%- endif -%}
+{%- if hs.ages | select('gt', max_handshake_age | int) | list | length > 0 -%}
+{%-   set ns.gaps = ns.gaps + [{'id': 'wireguard-handshake', 'message': 'a WireGuard peer has not completed a handshake for more than ' ~ max_handshake_age ~ ' s (ages: ' ~ hs.ages | join(', ') ~ ')'}] -%}
+{%- endif -%}
+{%- if s.get('k3s_version') != expected_k3s_version -%}{%- set ns.gaps = ns.gaps + [{'id': 'k3s-version', 'message': 'k3s is ' ~ s.get('k3s_version', 'unknown') ~ ', the pin is ' ~ expected_k3s_version}] -%}{%- endif -%}
+{%- if s.get('cilium_version') != expected_cilium_version -%}{%- set ns.gaps = ns.gaps + [{'id': 'cilium-version', 'message': 'Cilium is ' ~ s.get('cilium_version', 'unknown') ~ ', the pin is ' ~ expected_cilium_version}] -%}{%- endif -%}
+{%- if s.get('fail2ban') != 'active' -%}{%- set ns.gaps = ns.gaps + [{'id': 'fail2ban-inactive', 'message': 'fail2ban is not active'}] -%}
+{%- elif s.get('fail2ban_sshd_jail', '0') | int < 1 -%}{%- set ns.gaps = ns.gaps + [{'id': 'fail2ban-no-sshd-jail', 'message': 'fail2ban runs without its sshd jail'}] -%}{%- endif -%}
+{%- if expected_swap_mb | int > 0 and s.get('swap_total_mb', '0') | int < (expected_swap_mb | int * 0.95) -%}
+{%-   set ns.gaps = ns.gaps + [{'id': 'swap-missing', 'message': 'swap is ' ~ s.get('swap_total_mb', '0') ~ ' MiB, node_swap_size_mb is ' ~ expected_swap_mb}] -%}
+{%- elif expected_swap_mb | int == 0 and s.get('swap_total_mb', '0') | int > 0 -%}
+{%-   set ns.gaps = ns.gaps + [{'id': 'swap-enabled', 'message': 'swap is enabled (' ~ s.get('swap_total_mb') ~ ' MiB) and node_swap_size_mb is 0'}] -%}
+{%- endif -%}
+{{ ns.gaps | to_json }}
