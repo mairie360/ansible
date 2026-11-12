@@ -166,6 +166,104 @@
         fail_msg: "scripts/verify.sh failed for {{ inventory_hostname }}, see its output above."
 
 # =============================================================================
+# State of the machines (MAIR-242). Read-only. Fails on any gap; the rules are
+# in templates/machine_gaps.j2 and pinned by tests/machine_gaps_test.yml.
+# unattended-upgrades and the k3s secrets encryption are checked by the GDPR
+# play below.
+# =============================================================================
+
+- name: "State of the machines (firewall, WireGuard, k3s, Cilium, fail2ban, swap)"
+  hosts: "*_argocd:*_instances"
+  become: true
+  gather_facts: false
+  vars:
+    max_handshake_age: "{{ verify_wg_handshake_max_seconds | default(600) }}"
+  tasks:
+    - name: Collect the state of the machine
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          echo "ufw_status=$(ufw status | awk 'NR==1{print $2}')"
+          echo "ufw_default_incoming=$(ufw status verbose | awk '/^Default:/{print $2}')"
+          # Rules open to everyone: "80/tcp ALLOW Anywhere" (the wg0 ones read "22/tcp on wg0 ALLOW ...").
+          echo "ufw_public_ports=$(ufw status | awk '$2=="ALLOW" && $3=="Anywhere" && $1 ~ /^[0-9]/ {print $1}' | sort -u | paste -sd, -)"
+          now=$(date +%s)
+          wg show wg0 latest-handshakes 2>/dev/null | while read -r _ ts; do echo "wg_handshake_age=$((now - ts))"; done
+          echo "k3s_version=$(k3s --version 2>/dev/null | awk 'NR==1{print $3}')"
+          echo "cilium_version=$(kubectl -n kube-system get daemonset cilium -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null | sed -E 's/.*:v?([0-9]+\.[0-9]+\.[0-9]+).*/\1/')"
+          echo "fail2ban=$(systemctl is-active fail2ban 2>/dev/null || true)"
+          echo "fail2ban_sshd_jail=$(fail2ban-client status 2>/dev/null | grep -c sshd || true)"
+          echo "swap_total_mb=$(awk '/^SwapTotal:/{print int($2/1024)}' /proc/meminfo)"
+      args:
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      register: machine_state
+      changed_when: false
+
+    - name: Compute the gaps of the machine
+      ansible.builtin.set_fact:
+        machine_gaps: "{{ lookup('ansible.builtin.template', 'machine_gaps.j2') | from_json }}"
+      vars:
+        state: "{{ machine_state.stdout_lines | map('split', '=', 1) | list }}"
+        # 22 stays open to everyone until wireguard_close_public_ssh is set; WireGuard's own port
+        # only exists on the Argo CD machine.
+        expected_public_ports: >-
+          {{ ((node_public_ports | map('regex_replace', '$', '/tcp') | list)
+              + ([] if wireguard_close_public_ssh | default(false) | bool else ['22/tcp'])
+              + ([wg_port | string ~ '/udp'] if inventory_hostname in groups[org_group ~ '_argocd'] else []))
+             | sort }}
+        expected_k3s_version: "{{ k3s_version }}"
+        expected_cilium_version: "{{ cilium_version }}"
+        expected_swap_mb: "{{ node_swap_size_mb | default(2048) }}"
+        # The Argo CD machine is the WireGuard server (one peer per other machine of the group),
+        # an instance has the Argo CD machine as its only peer.
+        expected_wg_peers: >-
+          {{ (groups[org_group ~ '_instances'] | default([]) | length)
+             if inventory_hostname in groups[org_group ~ '_argocd'] else 1 }}
+
+    - name: Report the gaps of the machine
+      ansible.builtin.debug:
+        msg: "{{ item.id }}: {{ item.message }}"
+      loop: "{{ machine_gaps }}"
+      loop_control:
+        label: "{{ item.id }}"
+
+    - name: No gap on the machine
+      ansible.builtin.assert:
+        that: machine_gaps | length == 0
+        fail_msg: "{{ inventory_hostname }}: {{ machine_gaps | map(attribute='id') | join(', ') }}, see above."
+
+- name: "Local backup of the sealing keys"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - ../roles/k8s_instance_secrets/defaults/main.yml
+  tasks:
+    - name: Stat the sealing key of every instance
+      ansible.builtin.stat:
+        path: "{{ sealing_keys_dir }}/{{ hostvars[item].org_id }}-{{ hostvars[item].env_name }}.yaml"
+      register: sealing_keys
+      loop: "{{ groups.keys() | select('match', '.*_instances$') | map('extract', groups) | flatten }}"
+      loop_control:
+        label: "{{ item }}"
+
+    # A lost sealing key makes the SealedSecrets of the instance unreadable on a rebuilt cluster.
+    - name: Every sealing key is backed up here, readable by its owner only
+      ansible.builtin.assert:
+        that:
+          - item.stat.exists
+          - item.stat.size | default(0) > 0
+          - item.stat.mode | default('0777') is match('^0[0-7]00$')
+        fail_msg: >-
+          Sealing key of {{ item.item }} missing, empty or readable by others
+          ({{ item.invocation.module_args.path }}). Run `playbooks/secrets.yml` again (phase 4), then store it in the team vault.
+      loop: "{{ sealing_keys.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+# =============================================================================
 # GDPR configuration of the machines (MAIR-293, epic MAIR-284). Read-only.
 #
 # Every check below that fails is a gap. The play fails on any gap that is not

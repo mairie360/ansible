@@ -1,0 +1,83 @@
+---
+# Test of playbooks/templates/machine_gaps.j2 (MAIR-242), on localhost, no machine touched:
+#
+#   ansible-playbook tests/machine_gaps_test.yml
+#
+# Renders the gaps of a healthy Argo CD machine and of a degraded one, and checks the ids.
+- name: Machine gaps of verify.yml
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    expected_public_ports: ["22/tcp", "51820/udp"]
+    expected_k3s_version: "v1.35.8+k3s1"
+    expected_cilium_version: "1.20.2"
+    expected_swap_mb: 2048
+    expected_wg_peers: 2
+    max_handshake_age: 600
+    healthy_state:
+      - [ufw_status, active]
+      - [ufw_default_incoming, deny]
+      - [ufw_public_ports, "22/tcp,51820/udp"]
+      - [wg_handshake_age, "30"]
+      - [wg_handshake_age, "110"]
+      - [k3s_version, "v1.35.8+k3s1"]
+      - [cilium_version, "1.20.2"]
+      - [fail2ban, active]
+      - [fail2ban_sshd_jail, "1"]
+      - [swap_total_mb, "2047"]
+    degraded_state:
+      - [ufw_status, inactive]
+      - [ufw_default_incoming, allow]
+      - [ufw_public_ports, "22/tcp,6443/tcp,51820/udp"]
+      - [wg_handshake_age, "30"]
+      - [wg_handshake_age, "9000"]
+      - [k3s_version, "v1.34.1+k3s1"]
+      - [cilium_version, "1.19.0"]
+      - [fail2ban, inactive]
+      - [swap_total_mb, "0"]
+  tasks:
+    - name: Healthy machine
+      ansible.builtin.set_fact:
+        healthy: "{{ lookup('ansible.builtin.template', '../playbooks/templates/machine_gaps.j2') | from_json }}"
+      vars:
+        state: "{{ healthy_state }}"
+
+    - name: Degraded machine
+      ansible.builtin.set_fact:
+        degraded: "{{ lookup('ansible.builtin.template', '../playbooks/templates/machine_gaps.j2') | from_json }}"
+      vars:
+        state: "{{ degraded_state }}"
+
+    - name: Peer that never answered, port that should be open and is not, swap that must be off
+      ansible.builtin.set_fact:
+        other: "{{ lookup('ansible.builtin.template', '../playbooks/templates/machine_gaps.j2') | from_json }}"
+      vars:
+        state:
+          - [ufw_status, active]
+          - [ufw_default_incoming, deny]
+          - [ufw_public_ports, "22/tcp"]
+          - [wg_handshake_age, "30"]
+          - [k3s_version, "v1.35.8+k3s1"]
+          - [cilium_version, "1.20.2"]
+          - [fail2ban, active]
+          - [fail2ban_sshd_jail, "0"]
+          - [swap_total_mb, "512"]
+        expected_swap_mb: 0
+
+    - name: Check the gaps
+      ansible.builtin.assert:
+        that:
+          - healthy == []
+          - "'ufw-inactive' in degraded | map(attribute='id')"
+          - "'ufw-default-incoming' in degraded | map(attribute='id')"
+          - "'ufw-unexpected-port' in degraded | map(attribute='id')"
+          - "'wireguard-handshake' in degraded | map(attribute='id')"
+          - "'k3s-version' in degraded | map(attribute='id')"
+          - "'cilium-version' in degraded | map(attribute='id')"
+          - "'fail2ban-inactive' in degraded | map(attribute='id')"
+          - "'swap-missing' in degraded | map(attribute='id')"
+          - "'ufw-missing-port' in other | map(attribute='id')"
+          - "'wireguard-peers' in other | map(attribute='id')"
+          - "'fail2ban-no-sshd-jail' in other | map(attribute='id')"
+          - "'swap-enabled' in other | map(attribute='id')"

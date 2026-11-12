@@ -1,7 +1,8 @@
 # Static checks of the repository: no public IP address in a tracked file (MAIR-708),
 # image-updater templates (MAIR-186, MAIR-444), ansible-lint, no secret logged, the
 # instance secrets rules and the followed images against Deploiment (MAIR-599),
-# no secret in new commits (MAIR-677), the promotion runner (MAIR-346).
+# no secret in new commits (MAIR-677), the promotion runner (MAIR-346), the
+# syntax of the playbooks, yamllint and the machine checks of verify.yml (MAIR-242).
 name: Checks
 
 on:
@@ -86,6 +87,48 @@ jobs:
         run: ansible-galaxy collection install -r requirements.yml
       - name: Lint
         run: ansible-lint
+
+  syntax-check:
+    # MAIR-242: every playbook parses and resolves its roles and modules.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install ansible-core
+        run: pipx install ansible-core==2.20.7
+      - name: Install the collections
+        run: ansible-galaxy collection install -r requirements.yml
+      - name: Syntax check
+        run: |
+          for playbook in playbooks/*.yml; do
+            ansible-playbook --syntax-check "$playbook"
+          done
+
+  yamllint:
+    # MAIR-242: same style as ansible-lint's yaml rules (.yamllint).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install yamllint
+        run: pipx install yamllint==1.38.0
+      - name: Lint
+        run: yamllint --strict .
+
+  machine-checks:
+    # MAIR-242: the rules of verify.yml's machine checks (UFW, WireGuard, k3s, Cilium,
+    # fail2ban, swap) and the Argo CD install task's idempotence.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install ansible-core
+        run: pipx install ansible-core==2.20.7
+      - name: Render the machine gaps
+        run: ansible-playbook tests/machine_gaps_test.yml
+      - name: Install PyYAML
+        run: |
+          python3 -m venv "$RUNNER_TEMP/py"
+          "$RUNNER_TEMP/py/bin/pip" install pyyaml==6.0.3
+      - name: Argo CD install reports changed only when the cluster differs
+        run: '"$RUNNER_TEMP/py/bin/python" tests/check_argocd_install.py'
 
   no-log:
     # MAIR-599: tasks handling secrets set no_log.
