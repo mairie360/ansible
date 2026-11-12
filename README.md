@@ -394,7 +394,10 @@ project. The API key needs `SecretManagerFullAccess` on that project. Without
 any credentials the play stops and asks for `scw init`.
 
 ```bash
-# Read a value (latest version), e.g. the first admin password of dev
+# Read a value (latest enabled version), e.g. the first admin password of dev.
+# Only right after a complete run: a stopped run can leave an archive enabled
+# until the next one (check `scw secret version list <secret-id>`, archives
+# are described "MAIR-617 archived ...").
 scw secret secret list path=/mairie360/dev name=admin-password -o json | jq -r '.[0].id'
 scw secret version access <secret-id> revision=latest_enabled raw=true
 
@@ -412,9 +415,11 @@ and `.<pid>.<date>~` older copies), and runs before MAIR-599 left admin
 plaintexts on the Argo CD machine (`/root/.mairie360/admin-<org>-<env>.txt*`).
 The role finds the files of its own instance in both places, adds each
 distinct older value as an archived version (description `MAIR-617 archived
-<origin>:<file>`, disabled right after, so `latest_enabled` is never an
-archive), then the current value when it changes, reads them back,
-and only then deletes the files. It runs once per instance:
+<origin>:<file>`, disabled right after), then the current value when it
+changes, reads them back,
+and only then deletes the files. A run stopped between writing an archive and
+disabling it leaves that archive as `latest_enabled`; the next run disables it
+(the role itself never reads `latest_enabled`). It runs once per instance:
 `playbooks/secrets.yml --limit <host>` changes no sealed value; commit the
 resulting `secrets.yaml` as usual (its ciphertext changes on every run, its
 values do not).

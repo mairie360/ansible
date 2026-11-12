@@ -175,6 +175,45 @@ class CurrentRevisions(unittest.TestCase):
                          {"restic_password": None, "admin_password": None})
 
 
+class StaleArchives(unittest.TestCase):
+    """CodeRabbit on ansible#61: archives left enabled by a stopped run are disabled on the next one."""
+
+    def listed(self, key, versions):
+        return {"item": key, "json": {"versions": versions}}
+
+    def test_enabled_archives_are_stale_disabled_ones_and_values_are_not(self):
+        archive = vault.ARCHIVE_PREFIX + "workstation:restic.txt~"
+        listed = [
+            self.listed("restic_password", [
+                {"revision": 3, "status": "enabled", "description": archive},
+                {"revision": 1, "status": "enabled", "description": archive},
+                {"revision": 2, "status": "enabled", "description": "sealed on mairie360/dev"},
+                {"revision": 4, "status": "disabled", "description": archive},
+            ]),
+            self.listed("admin_password", [{"revision": 1, "status": "enabled", "description": "seed"}]),
+        ]
+        current = {"restic_password": 2, "admin_password": 1}
+        self.assertEqual(
+            vault.vault_stale_archives(listed, ["restic_password", "admin_password"], current),
+            [{"key": "restic_password", "revision": 1}, {"key": "restic_password", "revision": 3}],
+        )
+
+    def test_nothing_listed_nothing_stale(self):
+        self.assertEqual(vault.vault_stale_archives([], ["restic_password"], {"restic_password": None}), [])
+
+
+class TruncatedListings(unittest.TestCase):
+    """CodeRabbit on ansible#61: a version outside the page read could be the current one."""
+
+    def test_only_listings_shorter_than_their_total_are_reported(self):
+        listed = [
+            {"item": "restic_password", "json": {"total_count": 2, "versions": [{"revision": 1}, {"revision": 2}]}},
+            {"item": "admin_password", "json": {"total_count": 101, "versions": [{"revision": n} for n in range(100)]}},
+            {"item": "sealing-keys", "json": {"total_count": 0, "versions": []}},
+        ]
+        self.assertEqual(vault.vault_truncated_listings(listed), ["admin_password"])
+
+
 class SealingKeyWrites(unittest.TestCase):
     def test_one_version_per_key_not_stored_yet(self):
         writes = vault.vault_sealing_key_writes(

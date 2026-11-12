@@ -132,6 +132,43 @@ def vault_current_revisions(listed, keys):
     return current
 
 
+def vault_stale_archives(listed, keys, current):
+    """Archives still enabled outside the current revision, to disable.
+
+    vault_write.yml disables the archives it writes right after writing them;
+    a run stopped in between leaves them enabled, and newer than the current
+    value, so `latest_enabled` (scw CLI, console) would return an archive.
+    Returns [{key, revision}] for every such version of `keys`, read from the
+    same listing as vault_current_revisions; `current` is its result.
+    """
+    by_key = {result.get("item"): result for result in listed or []}
+    stale = []
+    for key in keys:
+        versions = (by_key.get(key, {}).get("json") or {}).get("versions") or []
+        for v in sorted(versions, key=lambda v: v["revision"]):
+            if (
+                v.get("status", "enabled") == "enabled"
+                and (v.get("description") or "").startswith(ARCHIVE_PREFIX)
+                and v["revision"] != (current or {}).get(key)
+            ):
+                stale.append({"key": key, "revision": v["revision"]})
+    return stale
+
+
+def vault_truncated_listings(listed):
+    """Items whose version listing holds fewer versions than total_count.
+
+    One page is read (page_size=100). A version left out could be the current
+    one, and the role would then pick an older value or generate a new one.
+    """
+    truncated = []
+    for result in listed or []:
+        body = result.get("json") or {}
+        if int(body.get("total_count", 0)) > len(body.get("versions") or []):
+            truncated.append(result.get("item"))
+    return truncated
+
+
 def sealing_key_manifest(secret):
     """The Secret manifest of one sealing key, without cluster-assigned fields.
 
@@ -222,5 +259,7 @@ class FilterModule:
             "vault_current_revisions": vault_current_revisions,
             "vault_sealing_key_writes": vault_sealing_key_writes,
             "vault_quota_overflows": vault_quota_overflows,
+            "vault_stale_archives": vault_stale_archives,
+            "vault_truncated_listings": vault_truncated_listings,
             "vault_readback_mismatches": vault_readback_mismatches,
         }
