@@ -1,18 +1,19 @@
 ---
-# Current version of RESTIC_PASSWORD and of the admin account's first password
-# in the vault (MAIR-617). The current version is the newest enabled one that
+# Current version of each vault_value_keys value in the vault: RESTIC_PASSWORD,
+# the admin account's first password (MAIR-617), the Resend key and the
+# Cockpit token (MAIR-803). The current version is the newest enabled one that
 # is not an archive of MAIR-599 (filter vault_current_revisions): reading
 # `latest_enabled` would return an archive left enabled by a run that stopped
 # between writing it and writing the current value. Archives such a run left
 # enabled are disabled here, so `latest_enabled` is the current value again.
-# Sets vault_values {restic_password, admin_password}, '' when absent.
+# Sets vault_values {key of vault_value_keys: value}, '' when absent.
 - name: List the versions of the generated secrets in the vault
   ansible.builtin.uri:
     url: "{{ vault_api_url }}/secrets/{{ vault_ids[vault_entries[item]] }}/versions?page_size=100"
     headers:
       X-Auth-Token: "{{ vault_auth.secret_key }}"
     return_content: true
-  loop: [restic_password, admin_password]
+  loop: "{{ vault_value_keys }}"
   delegate_to: localhost
   become: false
   register: vault_versions
@@ -32,7 +33,7 @@
 
 - name: Pick the current version of each generated secret
   ansible.builtin.set_fact:
-    vault_revisions: "{{ vault_versions.results | vault_current_revisions(['restic_password', 'admin_password']) }}"
+    vault_revisions: "{{ vault_versions.results | vault_current_revisions(vault_value_keys) }}"
   no_log: true
 
 - name: Disable the archives an interrupted run left enabled
@@ -43,7 +44,7 @@
       X-Auth-Token: "{{ vault_auth.secret_key }}"
     body_format: json
     body: {}
-  loop: "{{ vault_versions.results | vault_stale_archives(['restic_password', 'admin_password'], vault_revisions) }}"
+  loop: "{{ vault_versions.results | vault_stale_archives(vault_value_keys, vault_revisions) }}"
   loop_control:
     label: "{{ vault_entries[item.key] }} revision {{ item.revision }}"
   delegate_to: localhost
@@ -56,7 +57,7 @@
     headers:
       X-Auth-Token: "{{ vault_auth.secret_key }}"
     return_content: true
-  loop: [restic_password, admin_password]
+  loop: "{{ vault_value_keys }}"
   when: vault_revisions[item] is not none
   delegate_to: localhost
   become: false

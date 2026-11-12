@@ -156,6 +156,9 @@
             {"id": "id-admin", "name": "admin-password", "path": "/mairie360/dev", "project_id": "test-project",
              "versions": [{"revision": 1, "data": "{{ 'admin-in-vault' | b64encode }}", "description": "seed"}]},
             {"id": "id-keys", "name": "sealing-keys", "path": "/mairie360/dev", "project_id": "test-project", "versions": []},
+            {"id": "id-resend", "name": "resend-api-key", "path": "/mairie360/dev", "project_id": "test-project",
+             "versions": [{"revision": 1, "data": "{{ 're-in-vault' | b64encode }}", "description": "MAIR-617 sealed on mairie360/dev"}]},
+            {"id": "id-cockpit", "name": "cockpit-token", "path": "/mairie360/dev", "project_id": "test-project", "versions": []},
             {"id": "id-prod", "name": "restic-password", "path": "/mairie360/prod", "project_id": "test-project", "versions": []}
           ]}
 
@@ -185,7 +188,8 @@
         - name: The three secrets of the instance are found, not the other instance's
           ansible.builtin.assert:
             that: >-
-              vault_ids == {'restic-password': 'id-restic', 'admin-password': 'id-admin', 'sealing-keys': 'id-keys'}
+              vault_ids == {'restic-password': 'id-restic', 'admin-password': 'id-admin', 'sealing-keys': 'id-keys',
+                            'resend-api-key': 'id-resend', 'cockpit-token': 'id-cockpit'}
             fail_msg: "{{ vault_ids | to_json }}"
 
         - name: Read the generated secrets
@@ -196,7 +200,8 @@
         - name: A secret without version reads as empty
           ansible.builtin.assert:
             that: >-
-              vault_values == {'restic_password': '', 'admin_password': 'admin-in-vault'}
+              vault_values == {'restic_password': '', 'admin_password': 'admin-in-vault',
+                               'resend_api_key': 're-in-vault', 'cockpit_token': ''}
             fail_msg: "{{ vault_values | to_json }}"
 
         - name: Plan a new RESTIC_PASSWORD with a legacy copy to archive
@@ -374,7 +379,7 @@
               ansible.builtin.assert:
                 that:
                   - ansible_failed_result.msg is search('terraform apply')
-                  - ansible_failed_result.msg is search('admin-password, sealing-keys')
+                  - ansible_failed_result.msg is search('admin-password, cockpit-token, resend-api-key, sealing-keys')
                 fail_msg: "{{ ansible_failed_result.msg }}"
 
         - name: A wrong API key stops the play
