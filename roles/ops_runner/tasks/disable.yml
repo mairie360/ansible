@@ -1,0 +1,58 @@
+---
+# The group opted out (ops_runner_enabled: false): take back everything a
+# previous run installed, the instances' access first. Idempotent, and a
+# no-op on a machine that never had the runner.
+
+- name: Remove the operations user from the instances
+  ansible.builtin.user:
+    name: "{{ ops_runner_instance_user }}"
+    state: absent
+    remove: true
+  delegate_to: "{{ item }}"
+  loop: "{{ groups[org_group ~ '_instances'] | default([]) }}"
+
+- name: Remove the operations sudo rule from the instances
+  ansible.builtin.file:
+    path: /etc/sudoers.d/ansible-ops
+    state: absent
+  delegate_to: "{{ item }}"
+  loop: "{{ groups[org_group ~ '_instances'] | default([]) }}"
+
+- name: Check for an installed gh-ops.service
+  ansible.builtin.stat:
+    path: /etc/systemd/system/gh-ops.service
+  register: ops_runner_unit_stat
+
+- name: Stop and disable gh-ops
+  ansible.builtin.systemd:
+    name: gh-ops
+    state: stopped
+    enabled: false
+  when: ops_runner_unit_stat.stat.exists
+
+- name: Remove the operations runner, its wrapper, key and credential
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /etc/sudoers.d/gh-ops
+    - /etc/systemd/system/gh-ops.service
+    - /usr/local/sbin/mairie360-ops
+    - /etc/gh-ops
+    - /etc/mairie360-ops
+    - /var/lib/gh-ops
+    - "{{ ops_runner_work_dir }}"
+    - /usr/local/lib/gh-ops
+    - /opt/gh-ops
+    - "{{ ops_runner_home }}"
+  register: ops_runner_files_removed
+
+- name: Reload systemd after removing the unit  # noqa: no-handler
+  ansible.builtin.systemd:
+    daemon_reload: true
+  when: ops_runner_files_removed is changed
+
+- name: Remove the operations runner system user
+  ansible.builtin.user:
+    name: "{{ ops_runner_user }}"
+    state: absent

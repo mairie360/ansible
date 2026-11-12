@@ -10,9 +10,11 @@
 #   1. waits for the sealed-secrets controller Argo CD deploys on the instance
 #      (it needs the mairie360.fr/role=instance label set by phase 3);
 #   2. resolves the external secrets (Resend, S3, backup bucket, Cockpit, GHCR) from
-#      variables, else keeps what the instance already has, else prompts;
-#      the admin account e-mail (MAIR-170) is resolved the same way but is
-#      mandatory: the play fails if it is still empty after the prompt;
+#      variables, else the vault (Resend, Cockpit: MAIR-803), else keeps what
+#      the instance already has, else prompts; Resend and Cockpit values passed
+#      are stored in the vault; the admin account e-mail (MAIR-170) is resolved
+#      the same way (the sealed one is kept) but is mandatory: the play fails
+#      if it is still empty after the prompt;
 #      the Resend key is mandatory at the first sealing (MAIR-599);
 #   3. resolves RESTIC_PASSWORD and the admin account's first ADMIN_PASSWORD
 #      (instance, else the vault, else generated) and stores their plaintext
@@ -140,19 +142,47 @@
   register: on_cluster_raw
   changed_when: false
 
-- name: Resolve the external secrets from variables
+# MAIR-803: read before the external secrets, which fall back on the vault.
+- name: Resolve the vault credentials (MAIR-617)
+  ansible.builtin.include_tasks: vault_credentials.yml
+
+- name: Find the instance's secrets in the vault
+  ansible.builtin.include_tasks: vault_index.yml
+
+- name: Read the vault values (generated and external secrets)
+  ansible.builtin.include_tasks: vault_read.yml
+
+# MAIR-803: what a run with nothing typed (CI) keeps for the mandatory
+# admin account e-mail. Personal data: never logged.
+- name: Read the admin account e-mail sealed on the instance
+  ansible.builtin.shell: |
+    set -o pipefail
+    kubectl --kubeconfig {{ instance_kubeconfig }} -n {{ instance_ns }} \
+      get secret {{ env_name }}-database-secret -o json --ignore-not-found \
+      | jq -r '(.data.ADMIN_EMAIL // "") | @base64d'
+  args:
+    executable: /bin/bash
+  delegate_to: "{{ argocd_host }}"
+  register: admin_email_on_cluster
+  changed_when: false
+  no_log: true
+
+# Order per secret (filter resolve_external_secrets, unit-tested): instance_secrets,
+# the controller's environment, the vault (vault_external_keys), the admin
+# e-mail sealed on the instance; '' otherwise (seal-secrets.sh keeps what the
+# instance has, or the prompts below ask).
+- name: Resolve the external secrets from variables, the vault and the instance
   ansible.builtin.set_fact:
     on_cluster: "{{ on_cluster_raw.stdout | from_json }}"
     backup_enabled: "{{ ((instance_values_raw.content | b64decode | from_yaml).backup | default({})).enabled | default(false) | bool }}"
     observability_enabled: "{{ (((instance_values_raw.content | b64decode | from_yaml).global | default({})).observability | default({})).enabled | default(false) | bool }}"
     resolved_secrets: >-
-      {{ resolved_secrets | default({}) | combine({
-           item.key: (instance_secrets[inventory_hostname] | default({}))[item.key]
-                     | default(lookup('ansible.builtin.env', item.value), true)
-         }) }}
-  loop: "{{ instance_secret_env | dict2items }}"
-  loop_control:
-    label: "{{ item.key }}"
+      {{ instance_secret_env | resolve_external_secrets(
+           instance_secrets[inventory_hostname] | default({}),
+           dict(instance_secret_env.keys() | zip(query('ansible.builtin.env', *instance_secret_env.values()))),
+           vault_values,
+           vault_external_keys,
+           admin_email_on_cluster.stdout | default('') | trim) }}
   no_log: true
 
 # MAIR-599: the generated values this role backs up, and whether this is the
@@ -314,15 +344,6 @@
 # Nothing is written on the workstation: the local files of MAIR-599 are
 # uploaded, read back, then deleted.
 
-- name: Resolve the vault credentials (MAIR-617)
-  ansible.builtin.include_tasks: vault_credentials.yml
-
-- name: Find the instance's secrets in the vault
-  ansible.builtin.include_tasks: vault_index.yml
-
-- name: Read the generated secrets from the vault
-  ansible.builtin.include_tasks: vault_read.yml
-
 # Before MAIR-599 this role let seal-secrets.sh generate ADMIN_PASSWORD,
 # which wrote the plaintext on the Argo CD machine
 # (/root/.mairie360/admin-<org>-<env>.txt, older ones renamed with a date
@@ -398,10 +419,14 @@
   ansible.builtin.set_fact:
     vault_writes: >-
       {{ vault_values | vault_generated_writes(
-           generated_backup_writes,
+           generated_backup_writes | combine(external_vault_finals),
            legacy_generated.candidates + leftover_generated.candidates,
            vault_entries,
            'sealed on ' ~ org_id ~ '/' ~ env_name) }}
+  vars:
+    # MAIR-803: an external value passed or typed this run becomes the
+    # current version; one read from the vault equals it and adds nothing.
+    external_vault_finals: "{{ resolved_secrets | vault_external_finals(vault_external_keys) }}"
   no_log: true
 
 # Before sealing: a value sealed but not stored would be lost.

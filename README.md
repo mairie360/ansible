@@ -21,7 +21,7 @@ Chaque Argo CD ne pilote que les instances de son groupe, et son tunnel
 WireGuard ne porte que sur ce groupe. Un client compromis n'a aucune route
 réseau vers un autre : l'isolation vient de la topologie.
 
-## The five phases
+## The six phases
 
 | Phase | Role | Target | What it does |
 |---|---|---|---|
@@ -31,6 +31,7 @@ réseau vers un autre : l'isolation vient de la topologie.
 | 3 | `k8s_instance_link` | `*_instances` | `argocd cluster add` on the WireGuard IP + labels (`mairie360.fr/role`, `org`, `env`, `ingress`) + annotation `mairie360.fr/revision` |
 | 4 | `k8s_instance_secrets` | `*_instances` | Seals the instance secrets with `seal-secrets.sh`, asks for the missing external ones, copies `secrets.yaml` back to the local `Deploiment` checkout |
 | 5 | `github_runner` | `*_argocd` (installs with `github_runner_enabled`, removes otherwise) | Ephemeral GitHub Actions runner of `Deploiment` and a least-privilege kubeconfig on staging, so the Promote workflow runs `verify.sh` before prod (MAIR-346) |
+| 6 | `ops_runner` | `*_argocd` (installs with `ops_runner_enabled`, removes otherwise) | Ephemeral runner of this repository's Operations workflow: `secrets.yml` and `verify.yml` from the CI after approval (MAIR-803), see [Running from the CI](#running-from-the-ci-mair-803) |
 
 The `k8s_argocd` role installs **neither** cert-manager, **nor** the ingress
 controller, **nor** a ClusterIssuer: Argo CD deploys them on the instances,
@@ -178,6 +179,53 @@ when `gh-runner.service` is not active. On the machine:
 annotation, the runner's RBAC, admission policy and systemd unit on
 localhost and pins the rules above.
 
+## Running from the CI (MAIR-803)
+
+`secrets.yml` and `verify.yml` also run from the **Operations** workflow
+(`.github/workflows/ops.yml`), so that sealing an instance or checking it does
+not depend on one operator's workstation and is logged in GitHub. `site.yml`
+(machines, k3s, WireGuard, Argo CD) stays on the workstation. Actions →
+Operations → *Run workflow* on `main`, with the group, `secrets` or `verify`
+and the environment; a reviewer then approves the run in the environment
+`ops-<org>-<env>`.
+
+| | |
+|---|---|
+| Where | The group's Argo CD machine, runner of phase 6 (`roles/ops_runner`): same ephemeral JIT cycle and scripts as the promotion runner, registered on `mairie360/ansible` with labels `self-hosted`, `linux`, `mairie360-ops-<org_id>`, user `gh-ops` |
+| What a job may run | Only `sudo -n /usr/local/sbin/mairie360-ops <secrets\|verify> <org> <env>` (sudoers; `sudo` keeps only the `SCW_*` variables). The wrapper checks its arguments, refreshes a root-owned clone of this repository to `origin/main` (reset and clean, the commit is printed) and runs the playbook from it: a job picks the operation and the instance, never the code |
+| Inventory | `inventory/ci-<org>.yml` (tracked, WireGuard addresses only): the Argo CD machine is the controller and is reached locally; the instances over the tunnel as `ansible-ops`, with a key created on the Argo CD machine (`/etc/mairie360-ops/ssh/id_ed25519`, never copied off it), authorized on each instance only `from=` the Argo CD machine's WireGuard IP. `secrets.yml` never connects to the instances; `verify.yml` does (GDPR checks) |
+| `secrets` | Runs `secrets.yml --limit <org>-<env> -e secrets_prompt=false` against a fresh clone of Deploiment's `main`, reading every value from the vault with the key of the `ci-ansible` Scaleway application (`mairie360/Infra`, `iam/`). The sealed `secrets.yaml` goes back through an artifact to a GitHub-hosted job, which opens a pull request `chore(<env>): seal secrets` on Deploiment with the release app (none when unchanged) |
+| `verify` | Runs `verify.yml --limit <org>_argocd:<org>-<env>` |
+| Network | `gh-ops.service` blocks the tunnel and this machine's pod and Service networks except the group's instances. Its sandbox is lighter than `gh-runner.service`: the wrapper runs as root inside the unit (no `NoNewPrivileges`, no read-only system) |
+
+Values that are not in the vault cannot be typed in the CI: seal an instance's
+first `RESEND_API_KEY` / `COCKPIT_TOKEN` from the workstation once (they are
+then stored in the vault), or store them with `scw secret version create`.
+
+**Setup, once per group** (an operator, from the workstation):
+
+1. Install the runner's GitHub App on `mairie360/ansible` too (same App as the
+   promotion runner, repository permission *Administration: Read and write*).
+2. `ansible-playbook playbooks/site.yml --limit 'mairie360_argocd:mairie360_instances' --tags ops_runner`
+   (reuses the App credential of `/etc/gh-runner`, or `GITHUB_RUNNER_APP_ID` /
+   `GITHUB_RUNNER_APP_PRIVATE_KEY_FILE`).
+3. Create one environment per instance, `ops-<org>-<env>`, with required
+   reviewers and the deployment branch `main` only, holding the secrets
+   `SCW_ACCESS_KEY` / `SCW_SECRET_KEY` (an API key of the `ci-ansible`
+   application: `scw iam api-key create application-id=<id>`) and the variables
+   `SCW_DEFAULT_PROJECT_ID` / `SCW_DEFAULT_ORGANIZATION_ID`.
+4. Keep *Actions → Fork pull request workflows* on "require approval for all
+   outside collaborators": this repository is public, and only
+   `workflow_dispatch` workflows may target the runner.
+
+Turning `ops_runner_enabled` off and re-running `--tags ops_runner` removes the
+runner, the wrapper, the key, and the `ansible-ops` user of every instance.
+The workstation keeps working as before (same playbooks, `inventory/hosts.yml`).
+
+`tests/test_ops_runner.py` (wrapper, pull request script, workflow guards and
+CI inventories) and `tests/ops_runner_test.yml` (sudoers, unit) run in the CI
+job `ops-runner`.
+
 ## Usage
 
 Clone `Deploiment` next to this repo (`Devops/ansible` + `Devops/Deploiment`):
@@ -320,8 +368,11 @@ one that reaches the instance API server, through the tunnel. For each instance:
   (e.g. `-e @secrets.yml --ask-vault-pass`, see
   `roles/k8s_instance_secrets/defaults/main.yml`), environment variables
   (`RESEND_API_KEY`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `AWS_ACCESS_KEY_ID`,
-  `AWS_SECRET_ACCESS_KEY`, `COCKPIT_TOKEN`), the value already on the instance,
-  otherwise **a prompt** (empty to skip). The Resend key is **mandatory at the
+  `AWS_SECRET_ACCESS_KEY`, `COCKPIT_TOKEN`), then, for the Resend key and the
+  Cockpit token, the vault (secrets `resend-api-key` and `cockpit-token`,
+  MAIR-803: a value passed or typed once is stored there, so a later run, the
+  CI included, needs nothing typed), otherwise the value already on the
+  instance is kept, else **a prompt** (empty to skip). The Resend key is **mandatory at the
   first sealing** of an instance (no `<env>-keycloak-secret` on it yet, MAIR-599):
   Keycloak imports its SMTP settings once, an empty key would leave its e-mails
   broken for good, so the play fails instead. The backup bucket keys are only asked
@@ -329,7 +380,8 @@ one that reaches the instance API server, through the tunnel. For each instance:
   Cockpit token (`COCKPIT_TOKEN`, MAIR-131, read by the OpenTelemetry
   Collector) when `global.observability.enabled` is;
 - the town hall administrator's e-mail (`instance_secrets[<host>].admin_email`
-  / `ADMIN_EMAIL`, MAIR-170) is resolved the same way, but is **mandatory**:
+  / `ADMIN_EMAIL`, MAIR-170) is resolved the same way (the one already sealed
+  on the instance instead of the vault, MAIR-803), but is **mandatory**:
   prompted in clear (not hidden), and the play **fails** if it is still empty
   — no instance should keep Database's public template admin account by
   accident. The matching first `ADMIN_PASSWORD` is generated by the role (see

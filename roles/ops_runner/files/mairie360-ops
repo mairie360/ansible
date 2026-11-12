@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+# Installed by Ansible (role ops_runner, MAIR-803) — do not edit on the machine.
+#
+#   sudo mairie360-ops <secrets|verify> <org> <env>
+#
+# The only command the runner user (gh-ops) may run as root. It runs
+# playbooks/secrets.yml or playbooks/verify.yml of mairie360/ansible on one
+# instance, from a root-owned clone reset to origin/main: a job chooses WHICH
+# operation runs and on which instance, never the code that runs.
+#   secrets  seals the instance secrets into a fresh clone of Deploiment's
+#            main and leaves secrets.yaml in OUT_DIR for the job;
+#   verify   runs verify.yml on the group's Argo CD machine and the instance.
+# The Scaleway key comes from the SCW_* variables kept by sudo (sudoers);
+# no scw CLI profile is read.
+set -euo pipefail
+umask 077
+
+# sudo resets the environment: MAIRIE360_OPS_CONFIG only reaches this script
+# outside sudo (tests).
+config=${MAIRIE360_OPS_CONFIG:-/etc/mairie360-ops/ops.env}
+# shellcheck source=/dev/null
+. "$config"
+: "${OPS_ORG:?}" "${OPS_ENVS:?}" "${OPS_ANSIBLE_REPO:?}" "${OPS_DEPLOIMENT_REPO:?}"
+: "${OPS_WORK_DIR:?}" "${OPS_OUT_DIR:?}" "${OPS_OUT_GROUP:?}" "${OPS_BRANCH:=main}" "${OPS_OUT_OWNER:=root}"
+
+usage() {
+  echo "usage: $0 <secrets|verify> <org> <env>" >&2
+  exit 2
+}
+[ $# -eq 3 ] || usage
+action=$1
+org=$2
+env=$3
+
+case "$action" in
+  secrets | verify) ;;
+  *) usage ;;
+esac
+for value in "$org" "$env"; do
+  [[ "$value" =~ ^[a-z0-9][a-z0-9-]*$ ]] || usage
+done
+# This machine only holds its own group's instances.
+[ "$org" = "$OPS_ORG" ] || { echo "unknown group '$org' (this machine: $OPS_ORG)" >&2; exit 2; }
+case " $OPS_ENVS " in
+  *" $env "*) ;;
+  *) echo "unknown environment '$env' (group $OPS_ORG: $OPS_ENVS)" >&2; exit 2 ;;
+esac
+
+install -d -m 0700 "$OPS_WORK_DIR"
+# One operation at a time on the machine.
+exec 9>"$OPS_WORK_DIR/lock"
+flock 9
+
+repo="$OPS_WORK_DIR/ansible"
+if [ ! -d "$repo/.git" ]; then
+  rm -rf "$repo"
+  git clone --quiet --branch "$OPS_BRANCH" "$OPS_ANSIBLE_REPO" "$repo"
+fi
+git -C "$repo" fetch --quiet origin "$OPS_BRANCH"
+git -C "$repo" reset --quiet --hard FETCH_HEAD
+git -C "$repo" clean -qffdx
+echo "mairie360/ansible at $(git -C "$repo" rev-parse HEAD) ($OPS_BRANCH)"
+
+inventory="$repo/inventory/ci-$org.yml"
+[ -f "$inventory" ] || { echo "no CI inventory $inventory on $OPS_BRANCH" >&2; exit 1; }
+
+export ANSIBLE_CONFIG="$repo/ansible.cfg"
+export ANSIBLE_FORCE_COLOR=1
+[ -z "${OPS_VENV:-}" ] || export PATH="$OPS_VENV/bin:$PATH"
+[ -z "${OPS_COLLECTIONS:-}" ] || export ANSIBLE_COLLECTIONS_PATH="$OPS_COLLECTIONS"
+# Never a CLI profile of root: only the key the job passed.
+export SCW_CONFIG_PATH="$OPS_WORK_DIR/no-scw-config.yaml"
+unset SCW_PROFILE
+
+host="$org-$env"
+group=${org//-/_}
+cd "$repo"
+case "$action" in
+  secrets)
+    deploiment="$OPS_WORK_DIR/deploiment"
+    rm -rf "$deploiment"
+    git clone --quiet --depth 1 --branch "$OPS_BRANCH" "$OPS_DEPLOIMENT_REPO" "$deploiment"
+    echo "mairie360/Deploiment at $(git -C "$deploiment" rev-parse HEAD) ($OPS_BRANCH)"
+    ansible-playbook -i "$inventory" playbooks/secrets.yml --limit "$host" \
+      -e secrets_prompt=false \
+      -e "deploiment_local_path=$deploiment" \
+      -e "legacy_backup_dir=$OPS_WORK_DIR/no-legacy-backup"
+    sealed="$deploiment/clusters/$org/instances/$env/secrets.yaml"
+    out="$OPS_OUT_DIR/$host"
+    install -d -o "$OPS_OUT_OWNER" -g "$OPS_OUT_GROUP" -m 0750 "$OPS_OUT_DIR"
+    rm -rf "$out"
+    install -d -o "$OPS_OUT_OWNER" -g "$OPS_OUT_GROUP" -m 0750 "$out"
+    install -o "$OPS_OUT_OWNER" -g "$OPS_OUT_GROUP" -m 0640 "$sealed" "$out/secrets.yaml"
+    echo "sealed secrets: $out/secrets.yaml (clusters/$org/instances/$env/secrets.yaml)"
+    ;;
+  verify)
+    ansible-playbook -i "$inventory" playbooks/verify.yml --limit "${group}_argocd:$host"
+    ;;
+esac
