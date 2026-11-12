@@ -1,0 +1,32 @@
+---
+# SSH access of the operations to one instance (ops_runner_target): a user
+# with the operations key only, accepted only from the Argo CD machine's
+# WireGuard address (SSH listens on wg0 only, role k8s_node), with sudo for
+# Ansible's `become`.
+
+- name: Create the operations user on the instance
+  ansible.builtin.user:
+    name: "{{ ops_runner_instance_user }}"
+    shell: /bin/bash
+    password: "!"
+    password_lock: true
+  delegate_to: "{{ ops_runner_target.host }}"
+
+- name: Let the operations user become root on the instance
+  ansible.builtin.copy:
+    content: "{{ ops_runner_instance_user }} ALL=(ALL) NOPASSWD: ALL\n"
+    dest: /etc/sudoers.d/ansible-ops
+    owner: root
+    group: root
+    mode: "0440"
+    validate: visudo -cf %s
+  delegate_to: "{{ ops_runner_target.host }}"
+
+# exclusive: no other key logs in as this user.
+- name: Authorize the operations key from the Argo CD machine only
+  ansible.posix.authorized_key:
+    user: "{{ ops_runner_instance_user }}"
+    key: "{{ ops_runner_ssh_pub.content | b64decode | trim }}"
+    key_options: 'from="{{ wg_ip }}",no-agent-forwarding,no-port-forwarding,no-X11-forwarding'
+    exclusive: true
+  delegate_to: "{{ ops_runner_target.host }}"

@@ -1,0 +1,118 @@
+---
+# Test of role ops_runner (MAIR-803), on localhost, no machine touched:
+#
+#   ansible-playbook tests/ops_runner_test.yml
+#
+# Checks that:
+#   - the runner user may only run the wrapper as root, keeping only the
+#     Scaleway variables (sudoers, checked by visudo when installed);
+#   - gh-ops.service reaches no address of the tunnel but the group's
+#     instances, and runs its own copies of the runner scripts;
+#   - the wrapper knows exactly the group's environments;
+#   - the operations key logs in on an instance only from the Argo CD
+#     machine, as the only key of its user.
+- name: Operations runner
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    org_id: mairie360
+    org_group: mairie360
+    ops_runner_targets:
+      - {host: mairie360-dev, env_name: dev, wg_ip: 10.10.0.11}
+      - {host: mairie360-prod, env_name: prod, wg_ip: 10.10.0.13}
+    out: "{{ lookup('ansible.builtin.env', 'TMPDIR') | default('/tmp', true) }}/ops-runner-test"
+  tasks:
+    - name: Load the role defaults and the shared group variables
+      ansible.builtin.include_vars:
+        file: "{{ item }}"
+      loop:
+        - ../roles/ops_runner/defaults/main.yml
+        - ../inventory/group_vars/all.yml
+
+    - name: Render the templates
+      ansible.builtin.set_fact:
+        sudoers: "{{ lookup('ansible.builtin.template', '../roles/ops_runner/templates/sudoers.j2') }}"
+        unit: "{{ lookup('ansible.builtin.template', '../roles/ops_runner/templates/gh-ops.service.j2') }}"
+        ops_env: "{{ lookup('ansible.builtin.template', '../roles/ops_runner/templates/ops.env.j2') }}"
+        runner_env: "{{ lookup('ansible.builtin.template', '../roles/ops_runner/templates/runner.env.j2') }}"
+
+    - name: Sudo allows the wrapper only, and keeps only the Scaleway variables
+      ansible.builtin.assert:
+        that:
+          - rules == [rule]
+          - defaults == [keep]
+          - "'SETENV' not in sudoers"
+        fail_msg: "{{ sudoers }}"
+      vars:
+        lines: "{{ sudoers.splitlines() | reject('match', '^\\s*(#|$)') | list }}"
+        rules: "{{ lines | reject('match', '^Defaults') | list }}"
+        defaults: "{{ lines | select('match', '^Defaults') | list }}"
+        rule: "gh-ops ALL=(root) NOPASSWD: /usr/local/sbin/mairie360-ops"
+        keep: 'Defaults:gh-ops env_keep += "SCW_ACCESS_KEY SCW_SECRET_KEY SCW_DEFAULT_PROJECT_ID SCW_DEFAULT_ORGANIZATION_ID"'
+
+    - name: Check whether visudo is installed
+      ansible.builtin.command: which visudo
+      register: visudo
+      changed_when: false
+      failed_when: false
+
+    - name: Validate the sudoers file with visudo
+      when: visudo.rc == 0
+      block:
+        - name: Write the rendered sudoers file
+          ansible.builtin.copy:
+            content: "{{ sudoers }}"
+            dest: "{{ out }}-sudoers"
+            mode: "0440"
+
+        - name: Run visudo -c
+          ansible.builtin.command: "visudo -cf {{ out }}-sudoers"
+          changed_when: false
+      always:
+        - name: Remove the rendered sudoers file
+          ansible.builtin.file:
+            path: "{{ out }}-sudoers"
+            state: absent
+
+    - name: The unit reaches the group's instances only, never the rest of the tunnel
+      ansible.builtin.assert:
+        that:
+          - "'IPAddressDeny=10.10.0.0/16 10.42.0.0/16 10.43.0.0/16' in unit_lines"
+          - "'IPAddressAllow=10.10.0.11 10.10.0.13' in unit_lines"
+          - "'ExecStartPre=+/usr/local/lib/gh-ops/prepare.sh' in unit_lines"
+          - "'ExecStart=/usr/local/lib/gh-ops/start.sh' in unit_lines"
+          - "'User=gh-ops' in unit_lines"
+          - "'KillMode=control-group' in unit_lines"
+          - "'InaccessiblePaths=-/etc/gh-runner -/home/gh-runner' in unit_lines"
+          - "unit_lines | select('match', '^NoNewPrivileges') | list | length == 0"
+        fail_msg: "{{ unit }}"
+      vars:
+        unit_lines: "{{ unit.splitlines() }}"
+
+    - name: The runner and the wrapper are set for the group
+      ansible.builtin.assert:
+        that:
+          - "'OPS_ENVS=\"dev prod\"' in ops_env.splitlines()"
+          - "'OPS_ORG=mairie360' in ops_env.splitlines()"
+          - "'OPS_BRANCH=main' in ops_env.splitlines()"
+          - "'OPS_ANSIBLE_REPO=https://github.com/mairie360/ansible.git' in ops_env.splitlines()"
+          - "'RUNNER_LABELS=self-hosted,linux,mairie360-ops-mairie360' in runner_env.splitlines()"
+          - "'RUNNER_REPO=mairie360/ansible' in runner_env.splitlines()"
+          - "'RUNNER_CONF_DIR=/etc/gh-ops' in runner_env.splitlines()"
+        fail_msg: "{{ ops_env }}\n{{ runner_env }}"
+
+    - name: Read the instance access tasks
+      ansible.builtin.set_fact:
+        access_tasks: "{{ lookup('ansible.builtin.file', '../roles/ops_runner/tasks/instance_access.yml') | from_yaml }}"
+
+    - name: The operations key is the only key of its user, accepted from the Argo CD machine only
+      ansible.builtin.assert:
+        that:
+          - key['ansible.posix.authorized_key'].exclusive
+          - key['ansible.posix.authorized_key'].key_options is match('from="\{\{ wg_ip \}\}",')
+          - key['ansible.posix.authorized_key'].key_options is search('no-port-forwarding')
+          - key['ansible.posix.authorized_key'].key_options is search('no-agent-forwarding')
+        fail_msg: "{{ key | to_json }}"
+      vars:
+        key: "{{ access_tasks | selectattr('name', 'match', 'Authorize the operations key') | first }}"

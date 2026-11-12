@@ -1,0 +1,323 @@
+---
+# =============================================================================
+# PHASE 6 — Operations runner (MAIR-803), on the group's Argo CD machine, for
+# groups with ops_runner_enabled.
+#
+# The "Operations" workflow of mairie360/ansible (.github/workflows/ops.yml)
+# runs playbooks/secrets.yml or playbooks/verify.yml on one instance after a
+# reviewer approved it, instead of an operator's workstation:
+#   - same ephemeral runner as github_runner (prepare.sh / start.sh), on
+#     mairie360/ansible, labels [self-hosted, linux, mairie360-ops-<org>];
+#   - the runner user's only privilege is `sudo mairie360-ops <action> <org>
+#     <env>`: the wrapper runs this repository's `main` from a root-owned
+#     clone, never the job's code;
+#   - Ansible runs here with this machine as controller (inventory
+#     inventory/ci-<org>.yml): local connection to this machine, SSH over
+#     WireGuard to the instances as ops_runner_instance_user.
+# =============================================================================
+
+- name: Remove the operations runner (ops_runner_enabled is false)
+  ansible.builtin.include_tasks: disable.yml
+  when: not ops_runner_enabled | bool
+
+- name: Stop here when the operations runner is disabled
+  ansible.builtin.meta: end_role
+  when: not ops_runner_enabled | bool
+
+- name: Resolve the instances the operations run on
+  ansible.builtin.set_fact:
+    ops_runner_targets: >-
+      {%- set targets = [] -%}
+      {%- for h in groups[org_group ~ '_instances'] | default([]) -%}
+      {%- set _ = targets.append({'host': h, 'env_name': hostvars[h].env_name, 'wg_ip': hostvars[h].wg_ip}) -%}
+      {%- endfor -%}
+      {{ targets }}
+
+# The wrapper limits its runs to `<org>-<env>` (inventory/ci-<org>.yml).
+- name: Every instance is named <org>-<env>
+  ansible.builtin.assert:
+    that: item.host == org_id ~ '-' ~ item.env_name
+    fail_msg: "{{ item.host }} should be named {{ org_id }}-{{ item.env_name }} for the operations wrapper."
+  loop: "{{ ops_runner_targets }}"
+  loop_control:
+    label: "{{ item.host }}"
+
+# The runner's needs (prepare.sh: curl, jq, openssl, tar), the wrapper's
+# (git, flock, sudo, python3-venv) and the playbooks' (ssh, kubectl from k3s).
+- name: Install the operations runner dependencies
+  ansible.builtin.apt:
+    name: [bash, coreutils, curl, git, jq, openssh-client, openssl, python3-venv, sudo, tar, util-linux]
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Create the operations runner system user
+  ansible.builtin.user:
+    name: "{{ ops_runner_user }}"
+    system: true
+    shell: /usr/sbin/nologin
+    home: /var/lib/gh-ops/state/home
+    create_home: false
+
+- name: Create the operations runner directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: root
+    group: "{{ item.group | default('root') }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - { path: /etc/gh-ops, mode: "0700" }
+    - { path: /opt/gh-ops, mode: "0755" }
+    - { path: /usr/local/lib/gh-ops, mode: "0755" }
+    - { path: /var/lib/gh-ops, mode: "0755" }
+    - { path: /var/lib/gh-ops/state, mode: "0755" }
+    - { path: "{{ ops_runner_out_dir }}", group: "{{ ops_runner_user }}", mode: "0750" }
+    - { path: /etc/mairie360-ops, mode: "0700" }
+    - { path: "{{ ops_runner_ssh_key | dirname }}", mode: "0700" }
+    - { path: "{{ ops_runner_home }}", mode: "0755" }
+    - { path: "{{ ops_runner_work_dir }}", mode: "0700" }
+  loop_control:
+    label: "{{ item.path }}"
+
+# --- Pinned runner release (same pin as github_runner) ------------------------
+
+- name: Download the pinned runner release (sha256 verified)
+  ansible.builtin.get_url:
+    url: "https://github.com/actions/runner/releases/download/v{{ github_runner_version }}/actions-runner-linux-x64-{{ github_runner_version }}.tar.gz"
+    dest: "/opt/gh-ops/actions-runner-linux-x64-{{ github_runner_version }}.tar.gz"
+    checksum: "sha256:{{ github_runner_sha256 }}"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Create the pristine runner directory of this version
+  ansible.builtin.file:
+    path: "/opt/gh-ops/dist-{{ github_runner_version }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Unpack the runner release
+  ansible.builtin.unarchive:
+    src: "/opt/gh-ops/actions-runner-linux-x64-{{ github_runner_version }}.tar.gz"
+    dest: "/opt/gh-ops/dist-{{ github_runner_version }}"
+    remote_src: true
+    owner: root
+    group: root
+    creates: "/opt/gh-ops/dist-{{ github_runner_version }}/run.sh"
+  register: ops_runner_unpacked
+  notify: Restart gh-ops
+
+- name: Install the runner's system dependencies (libicu, ...)  # noqa: no-handler
+  ansible.builtin.command: ./bin/installdependencies.sh
+  args:
+    chdir: "/opt/gh-ops/dist-{{ github_runner_version }}"
+  when: ops_runner_unpacked is changed
+  changed_when: true
+
+- name: Find the releases left by a previous pin
+  ansible.builtin.find:
+    paths: /opt/gh-ops
+    patterns: ["dist-*", "actions-runner-linux-x64-*.tar.gz"]
+    file_type: any
+    excludes:
+      - "dist-{{ github_runner_version }}"
+      - "actions-runner-linux-x64-{{ github_runner_version }}.tar.gz"
+  register: ops_runner_old_releases
+
+- name: Remove the releases left by a previous pin
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: absent
+  loop: "{{ ops_runner_old_releases.files }}"
+  loop_control:
+    label: "{{ item.path }}"
+
+# --- Ansible of the wrapper ------------------------------------------------------
+
+- name: Install ansible-core in the wrapper's virtualenv
+  ansible.builtin.pip:
+    name: "ansible-core=={{ ops_runner_ansible_core_version }}"
+    virtualenv: "{{ ops_runner_home }}/venv"
+    virtualenv_command: python3 -m venv
+
+- name: Copy the collection requirements
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../requirements.yml"
+    dest: "{{ ops_runner_home }}/requirements.yml"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Install the collections of requirements.yml
+  ansible.builtin.command:
+    cmd: >-
+      {{ ops_runner_home }}/venv/bin/ansible-galaxy collection install
+      -r {{ ops_runner_home }}/requirements.yml -p {{ ops_runner_home }}/collections
+  register: ops_runner_collections
+  changed_when: "'Nothing to do' not in ops_runner_collections.stdout"
+
+# --- SSH access to the instances ------------------------------------------------
+
+- name: Create the operations SSH key (kept on this machine)
+  ansible.builtin.command:
+    cmd: "ssh-keygen -q -t ed25519 -N '' -C 'mairie360-ops@{{ inventory_hostname }}' -f {{ ops_runner_ssh_key }}"
+    creates: "{{ ops_runner_ssh_key }}"
+
+- name: Read the operations SSH public key
+  ansible.builtin.slurp:
+    src: "{{ ops_runner_ssh_key }}.pub"
+  register: ops_runner_ssh_pub
+
+- name: Give the operations access to each instance
+  ansible.builtin.include_tasks: instance_access.yml
+  loop: "{{ ops_runner_targets }}"
+  loop_control:
+    loop_var: ops_runner_target
+    label: "{{ ops_runner_target.env_name }}"
+
+# --- Wrapper -----------------------------------------------------------------------
+
+- name: Install the operations wrapper
+  ansible.builtin.copy:
+    src: mairie360-ops
+    dest: /usr/local/sbin/mairie360-ops
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Write the wrapper settings
+  ansible.builtin.template:
+    src: ops.env.j2
+    dest: /etc/mairie360-ops/ops.env
+    owner: root
+    group: root
+    mode: "0600"
+
+- name: Let the runner user run the wrapper as root, nothing else
+  ansible.builtin.template:
+    src: sudoers.j2
+    dest: /etc/sudoers.d/gh-ops
+    owner: root
+    group: root
+    mode: "0440"
+    validate: visudo -cf %s
+
+# --- GitHub App credential --------------------------------------------------------
+
+- name: Fail on an App private key file without its App ID
+  ansible.builtin.assert:
+    that: ops_runner_app_id | length > 0
+    fail_msg: GITHUB_RUNNER_APP_PRIVATE_KEY_FILE is set but GITHUB_RUNNER_APP_ID is not.
+  when: ops_runner_app_private_key_file | length > 0
+
+- name: Store the App private key from the controller (root only)
+  ansible.builtin.copy:
+    src: "{{ ops_runner_app_private_key_file | expanduser }}"
+    dest: /etc/gh-ops/app.pem
+    owner: root
+    group: root
+    mode: "0600"
+  when: ops_runner_app_private_key_file | length > 0
+  diff: false
+  no_log: true
+  notify: Restart gh-ops
+
+- name: Store the App ID from the controller
+  ansible.builtin.copy:
+    content: "{{ ops_runner_app_id }}\n"
+    dest: /etc/gh-ops/app-id
+    owner: root
+    group: root
+    mode: "0600"
+  when: ops_runner_app_private_key_file | length > 0
+  notify: Restart gh-ops
+
+- name: Check for the promotion runner's App credential on this machine
+  ansible.builtin.stat:
+    path: "/etc/gh-runner/{{ item }}"
+  loop: [app.pem, app-id]
+  register: ops_runner_shared_app
+
+# Same App as the promotion runner: reuse its credential when none was given.
+- name: Reuse the promotion runner's App credential
+  ansible.builtin.copy:
+    src: "/etc/gh-runner/{{ item }}"
+    dest: "/etc/gh-ops/{{ item }}"
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0600"
+  loop: [app.pem, app-id]
+  when:
+    - ops_runner_app_private_key_file | length == 0
+    - ops_runner_shared_app.results | map(attribute='stat.exists') | min
+  diff: false
+  no_log: true
+  notify: Restart gh-ops
+
+- name: Check the operations runner's App credential
+  ansible.builtin.stat:
+    path: "/etc/gh-ops/{{ item }}"
+  loop: [app.pem, app-id]
+  register: ops_runner_app_files
+
+- name: The operations runner can register
+  ansible.builtin.set_fact:
+    ops_runner_app_ready: "{{ ops_runner_app_files.results | map(attribute='stat.exists') | min }}"
+
+# --- Service -------------------------------------------------------------------------
+
+- name: Install the runner scripts (shared with github_runner)
+  ansible.builtin.copy:
+    src: "{{ role_path }}/../github_runner/files/{{ item }}"
+    dest: "/usr/local/lib/gh-ops/{{ item }}"
+    owner: root
+    group: root
+    mode: "0755"
+  loop: [prepare.sh, start.sh]
+  notify: Restart gh-ops
+
+- name: Write the runner settings
+  ansible.builtin.template:
+    src: runner.env.j2
+    dest: /etc/gh-ops/runner.env
+    owner: root
+    group: root
+    mode: "0600"
+  notify: Restart gh-ops
+
+- name: Install gh-ops.service
+  ansible.builtin.template:
+    src: gh-ops.service.j2
+    dest: /etc/systemd/system/gh-ops.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart gh-ops
+
+- name: Enable and start gh-ops
+  ansible.builtin.systemd:
+    name: gh-ops
+    enabled: true
+    state: started
+    daemon_reload: true
+  when: ops_runner_app_ready | bool
+
+- name: Warn when the operations runner cannot register
+  ansible.builtin.debug:
+    msg: >-
+      No GitHub App credential for the operations runner (GITHUB_RUNNER_APP_ID /
+      GITHUB_RUNNER_APP_PRIVATE_KEY_FILE, or the promotion runner's): gh-ops is
+      installed but not started, and the Operations workflow cannot run.
+  when: not ops_runner_app_ready | bool
+
+- name: Operations runner summary
+  ansible.builtin.debug:
+    msg:
+      - "Operations runner of {{ ops_runner_repo }} on {{ inventory_hostname }} (started unless warned above)"
+      - "Labels: {{ ops_runner_labels | join(', ') }}"
+      - "Environments: {{ ops_runner_targets | map(attribute='env_name') | join(', ') }}"
+      - "Logs: journalctl -u gh-ops"

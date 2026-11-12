@@ -1,0 +1,7 @@
+---
+- name: Restart gh-ops
+  ansible.builtin.systemd:
+    name: gh-ops
+    state: restarted
+    daemon_reload: true
+  when: ops_runner_app_ready | default(false) | bool

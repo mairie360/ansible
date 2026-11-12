@@ -1,0 +1,45 @@
+# =============================================================================
+# Inventory of the Operations workflow for the mairie360 group (MAIR-803)
+#
+# Read by /usr/local/sbin/mairie360-ops (role ops_runner) on the group's Argo
+# CD machine, which is the Ansible controller there:
+#   - the Argo CD machine is reached locally;
+#   - the instances are reached over WireGuard (`ansible_host` = `wg_ip`), as
+#     the operations user, with the key that role ops_runner created.
+# No public address: this file is tracked (tests/check_no_public_ip.py). It
+# lives in inventory/ so that inventory/group_vars/ applies, like hosts.yml.
+# Host names, wg_ip, env_name, instance_domain and ingress_controller must
+# match inventory/hosts.yml (tests/test_ops_runner.py checks this file).
+# =============================================================================
+all:
+  children:
+    mairie360_argocd:
+      hosts:
+        mairie360-argocd:
+          ansible_connection: local
+          wg_ip: "10.10.0.1"
+
+    mairie360_instances:
+      hosts:
+        mairie360-dev:
+          ansible_host: "10.10.0.11"
+          wg_ip: "10.10.0.11"
+          env_name: dev
+          instance_domain: "dev.mairie360-eip.fr"
+          ingress_controller: traefik
+        mairie360-staging:
+          ansible_host: "10.10.0.12"
+          wg_ip: "10.10.0.12"
+          env_name: staging
+          instance_domain: "staging.mairie360-eip.fr"
+          ingress_controller: traefik
+        mairie360-prod:
+          ansible_host: "10.10.0.13"
+          wg_ip: "10.10.0.13"
+          env_name: prod
+          instance_domain: "mairie360-eip.fr"
+          ingress_controller: traefik
+
+  vars:
+    ansible_user: ansible-ops
+    ansible_ssh_private_key_file: /etc/mairie360-ops/ssh/id_ed25519
