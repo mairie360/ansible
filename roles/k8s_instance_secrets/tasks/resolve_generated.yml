@@ -59,11 +59,15 @@
            else lookup('ansible.builtin.password', '/dev/null', chars=['digits', 'abcdef'], length=64)) }}
   no_log: true
 
-# Not the admin hash: the vault keeps the plaintext it already holds.
+# Never the admin hash. When the instance holds the hash, the plaintext known
+# for it (vault, else the plain-named copy of MAIR-599) stays the current
+# version: an older suffixed copy is only archived (CodeRabbit on ansible#61).
 - name: Resolve the plaintexts to store in the vault
   ansible.builtin.set_fact:
     generated_backup_writes: >-
       {{ {'restic_password': generated_seal.restic_password}
          | combine({'admin_password': generated_seal.admin_password}
-                   if generated_sources.admin_password != 'cluster' else {}) }}
+                   if generated_sources.admin_password != 'cluster'
+                   else ({'admin_password': generated_backups.admin_password}
+                         if generated_backups.admin_password | length > 0 else {})) }}
   no_log: true

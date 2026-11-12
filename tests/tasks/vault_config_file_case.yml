@@ -1,0 +1,14 @@
+---
+# One case of tests/vault_test.yml: runs vault_credentials.yml with `case.env`
+# (no key in the environment) and checks which scw configuration it read.
+- name: "Read the scw configuration: {{ case.name }}"
+  ansible.builtin.include_role:
+    name: k8s_instance_secrets
+    tasks_from: vault_credentials.yml
+  vars:
+    scw_env: "{{ {'secret_key': '', 'project_id': '', 'profile': ''} | combine(case.env) }}"
+
+- name: "Check the scw configuration read: {{ case.name }}"
+  ansible.builtin.assert:
+    that: vault_auth.secret_key == case.expected
+    fail_msg: "{{ case.name }}: key of {{ vault_auth.secret_key }}"

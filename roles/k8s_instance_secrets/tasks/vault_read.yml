@@ -1,15 +1,35 @@
 ---
-# Latest enabled version of RESTIC_PASSWORD and of the admin account's first
-# password in the vault (MAIR-617). A secret without any version yet answers
-# 404. Sets vault_values {restic_password, admin_password}, '' when absent.
-- name: Read the generated secrets stored in the vault
+# Current version of RESTIC_PASSWORD and of the admin account's first password
+# in the vault (MAIR-617). The current version is the newest enabled one that
+# is not an archive of MAIR-599 (filter vault_current_revisions): reading
+# `latest_enabled` would return an archive left enabled by a run that stopped
+# between writing it and writing the current value.
+# Sets vault_values {restic_password, admin_password}, '' when absent.
+- name: List the versions of the generated secrets in the vault
   ansible.builtin.uri:
-    url: "{{ vault_api_url }}/secrets/{{ vault_ids[vault_entries[item]] }}/versions/latest_enabled/access"
+    url: "{{ vault_api_url }}/secrets/{{ vault_ids[vault_entries[item]] }}/versions?page_size=100"
     headers:
       X-Auth-Token: "{{ vault_auth.secret_key }}"
-    status_code: [200, 404]
     return_content: true
   loop: [restic_password, admin_password]
+  delegate_to: localhost
+  become: false
+  register: vault_versions
+  no_log: true
+
+- name: Pick the current version of each generated secret
+  ansible.builtin.set_fact:
+    vault_revisions: "{{ vault_versions.results | vault_current_revisions(['restic_password', 'admin_password']) }}"
+  no_log: true
+
+- name: Read the generated secrets stored in the vault
+  ansible.builtin.uri:
+    url: "{{ vault_api_url }}/secrets/{{ vault_ids[vault_entries[item]] }}/versions/{{ vault_revisions[item] }}/access"
+    headers:
+      X-Auth-Token: "{{ vault_auth.secret_key }}"
+    return_content: true
+  loop: [restic_password, admin_password]
+  when: vault_revisions[item] is not none
   delegate_to: localhost
   become: false
   register: vault_reads

@@ -60,6 +60,53 @@
         loop_var: case
         label: "{{ case.name }}"
 
+    # CodeRabbit on ansible#61: the scw CLI also reads
+    # $XDG_CONFIG_HOME/scw/config.yaml; the role used to look in ~/.config only.
+    - name: Find the scw configuration like the scw CLI
+      block:
+        - name: Create the configuration directory
+          ansible.builtin.tempfile:
+            state: directory
+            suffix: mair617-scw
+          register: scw_dir
+
+        - name: Create the configuration locations
+          ansible.builtin.file:
+            path: "{{ scw_dir.path }}/{{ item }}"
+            state: directory
+            mode: "0700"
+          loop: [explicit, xdg/scw, home/.config/scw]
+
+        - name: Write one scw configuration per location
+          ansible.builtin.copy:
+            dest: "{{ scw_dir.path }}/{{ item }}"
+            mode: "0600"
+            content: "{secret_key: {{ item | regex_replace('/.*', '') }}-key, default_project_id: p}\n"
+          loop: [explicit/config.yaml, xdg/scw/config.yaml, home/.config/scw/config.yaml]
+          loop_control:
+            label: "{{ item }}"
+
+        - name: Read each location
+          ansible.builtin.include_tasks: tasks/vault_config_file_case.yml
+          loop:
+            - name: SCW_CONFIG_PATH wins
+              env: {config_path: "{{ scw_dir.path }}/explicit/config.yaml", xdg_config_home: "{{ scw_dir.path }}/xdg", home: "{{ scw_dir.path }}/home"}
+              expected: explicit-key
+            - name: XDG_CONFIG_HOME before the home directory
+              env: {config_path: "", xdg_config_home: "{{ scw_dir.path }}/xdg", home: "{{ scw_dir.path }}/home"}
+              expected: xdg-key
+            - name: ~/.config without XDG_CONFIG_HOME
+              env: {config_path: "", xdg_config_home: "", home: "{{ scw_dir.path }}/home"}
+              expected: home-key
+          loop_control:
+            loop_var: case
+            label: "{{ case.name }}"
+      always:
+        - name: Remove the configuration directory
+          ansible.builtin.file:
+            path: "{{ scw_dir.path }}"
+            state: absent
+
     - name: No credentials at all stops the play
       block:
         - name: Resolve without any credentials
@@ -169,11 +216,13 @@
           ansible.builtin.set_fact:
             vault_state: "{{ lookup('ansible.builtin.file', test_dir.path ~ '/state.json') | from_json }}"
 
-        - name: The archive comes first, the sealed value is the latest
+        - name: The archive comes first and is disabled, the sealed value is the latest
           ansible.builtin.assert:
             that:
               - restic.versions | map(attribute='data') | map('b64decode') | list == ['restic-old', 'restic-sealed']
               - restic.versions[0].description is search('archived workstation:restic.txt~')
+              - restic.versions[0].status == 'disabled'
+              - restic.versions[1].status | default('enabled') == 'enabled'
               - admin.versions | length == 1
             fail_msg: "{{ vault_state | to_json }}"
           vars:
@@ -188,6 +237,41 @@
         - name: The latest version is read
           ansible.builtin.assert:
             that: vault_values.restic_password == 'restic-sealed'
+
+        # CodeRabbit on ansible#61: a run that stops after writing an archive
+        # but before the current value leaves that archive enabled and newest.
+        - name: Leave an enabled archive as the newest version, like an interrupted run
+          ansible.builtin.copy:
+            dest: "{{ test_dir.path }}/state.json"
+            mode: "0600"
+            content: "{{ {'secrets': others + [restic | combine({'versions': restic.versions + [stale]})]} | to_json }}"
+          vars:
+            restic: "{{ vault_state.secrets | selectattr('id', 'equalto', 'id-restic') | first }}"
+            others: "{{ vault_state.secrets | rejectattr('id', 'equalto', 'id-restic') | list }}"
+            stale:
+              revision: 3
+              data: "{{ 'restic-older' | b64encode }}"
+              description: MAIR-617 archived workstation:restic.txt.2026~
+              status: enabled
+
+        - name: The stand-in now serves that archive as latest_enabled
+          ansible.builtin.uri:
+            url: "{{ vault_api_url }}/secrets/id-restic/versions/latest_enabled/access"
+            headers:
+              X-Auth-Token: "{{ vault_auth.secret_key }}"
+          register: stale_latest
+          failed_when: stale_latest.json.data | b64decode != 'restic-older'
+          no_log: true
+
+        - name: Read the generated secrets after the interrupted run
+          ansible.builtin.include_role:
+            name: k8s_instance_secrets
+            tasks_from: vault_read.yml
+
+        - name: The enabled archive is not taken for the current value
+          ansible.builtin.assert:
+            that: vault_values.restic_password == 'restic-sealed'
+            fail_msg: "{{ vault_values.restic_password | length }} characters read instead of restic-sealed"
 
         - name: Upload the sealing keys twice
           ansible.builtin.include_tasks: tasks/vault_sealing_keys_run.yml
@@ -241,10 +325,12 @@
               ansible.builtin.fail:
                 msg: wrong API key accepted
           rescue:
-            - name: The vault refused the call
+            # CodeRabbit on ansible#61: any failure used to pass; it must be
+            # the API refusing the key.
+            - name: The vault refused the call with 401
               ansible.builtin.assert:
-                that: ansible_failed_result.msg is not search('Not reached|accepted')
-                fail_msg: "{{ ansible_failed_result.msg }}"
+                that: ansible_failed_result.status | default(0) == 401
+                fail_msg: "{{ ansible_failed_result.msg | default('') }} (status {{ ansible_failed_result.status | default('none') }})"
       always:
         - name: Stop the stand-in Secret Manager
           ansible.builtin.command: pkill -f "mock_secret_manager.py --port {{ mock_port }}"
