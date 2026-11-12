@@ -6,11 +6,12 @@
 #   ansible-playbook playbooks/site.yml --limit mairie360_argocd:mairie360_instances
 #   ansible-playbook playbooks/site.yml --limit client_example_argocd:client_example_instances
 #
-# The five phases: prepare the k8s base, start the group's Argo CD, link the
+# The six phases: prepare the k8s base, start the group's Argo CD, link the
 # instances to it once both sides are ready, seal each instance's secrets
 # (prompting for the external ones that are missing), then, for groups that
 # promote (github_runner_enabled), install the runner that verifies staging
-# before a promotion to prod.
+# before a promotion to prod, and, for groups with ops_runner_enabled, the
+# runner of the Operations workflow (MAIR-803).
 #
 # The `*_argocd` / `*_instances` patterns are resolved by Ansible itself:
 # adding a client needs NO change here. Always --limit whole groups
@@ -62,3 +63,16 @@
   roles:
     - role: github_runner
       tags: [github_runner]
+
+# MAIR-803: runner of this repository's Operations workflow (secrets.yml and
+# verify.yml from the CI, after approval), on the Argo CD machine of the
+# groups that enable it. `--tags ops_runner` re-applies it alone. Applied to
+# every Argo CD machine: with ops_runner_enabled false, the role removes a
+# runner and the instance access left by an earlier run.
+- name: "Phase 6 — operations runner (installed or removed per ops_runner_enabled)"
+  hosts: "*_argocd"
+  become: true
+  serial: 1
+  roles:
+    - role: ops_runner
+      tags: [ops_runner]

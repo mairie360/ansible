@@ -1,0 +1,58 @@
+# Role ops_runner (MAIR-803): self-hosted runner of the ansible repository's
+# "Operations" workflow (.github/workflows/ops.yml), on the group's Argo CD
+# machine. Opt-in per group: ops_runner_enabled in
+# inventory/group_vars/<org>_argocd.yml. README, "Running from the CI".
+
+ops_runner_enabled: false
+
+# Repository the runner registers on (repository level, like github_runner).
+ops_runner_repo: mairie360/ansible
+# Code the wrapper runs: always this repository's `main`, fetched again
+# before every operation, never the code of the job.
+ops_runner_ansible_repo_url: "https://github.com/{{ ops_runner_repo }}.git"
+
+# `runs-on: [self-hosted, linux, mairie360-ops-<org_id>]`: the last label is
+# unique per group, so an operation never lands on another group's machine.
+ops_runner_labels:
+  - self-hosted
+  - linux
+  - "mairie360-ops-{{ org_id }}"
+
+# Non-root user of the runner and its jobs. Its only privilege is
+# `sudo /usr/local/sbin/mairie360-ops` (templates/sudoers.j2).
+ops_runner_user: gh-ops
+
+# Ansible run by the wrapper, isolated from the system Python: same version
+# as the repository's CI (.github/workflows/checks.yml), collections from
+# requirements.yml.
+ops_runner_home: /opt/mairie360-ops
+ops_runner_ansible_core_version: "2.20.7"
+
+# Root-owned working copies of the wrapper (ansible and Deploiment clones).
+ops_runner_work_dir: /var/lib/mairie360-ops
+# Sealed secrets.yaml left for the job (readable by the runner user only).
+ops_runner_out_dir: /var/lib/gh-ops/out
+
+# SSH from this machine to the group's instances (verify.yml connects to
+# them; secrets.yml does not). The key never leaves this machine; on each
+# instance it only logs in as ops_runner_instance_user, and only from this
+# machine's WireGuard address.
+ops_runner_ssh_key: /etc/mairie360-ops/ssh/id_ed25519
+ops_runner_instance_user: ansible-ops
+
+# GitHub App registering the runner: the App of github_runner (installed on
+# mairie360/ansible too, "Administration: Read and write"). Taken from the
+# same controller variables (GITHUB_RUNNER_APP_ID /
+# GITHUB_RUNNER_APP_PRIVATE_KEY_FILE), else from /etc/gh-runner on this
+# machine, else the copy already in /etc/gh-ops. Never prompted.
+ops_runner_app_id: "{{ lookup('ansible.builtin.env', 'GITHUB_RUNNER_APP_ID') }}"
+ops_runner_app_private_key_file: "{{ lookup('ansible.builtin.env', 'GITHUB_RUNNER_APP_PRIVATE_KEY_FILE') }}"
+
+# Scaleway variables the job may pass to the wrapper through sudo (the
+# ci-ansible application's key, MAIR-803 in mairie360/Infra). Nothing else of
+# the job's environment reaches the wrapper.
+ops_runner_env_keep:
+  - SCW_ACCESS_KEY
+  - SCW_SECRET_KEY
+  - SCW_DEFAULT_PROJECT_ID
+  - SCW_DEFAULT_ORGANIZATION_ID

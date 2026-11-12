@@ -2,7 +2,7 @@
 # image-updater templates (MAIR-186, MAIR-444), ansible-lint, no secret logged, the
 # instance secrets rules and the followed images against Deploiment (MAIR-599),
 # no secret in new commits (MAIR-677), the promotion runner (MAIR-346), the
-# Secret Manager vault of the instance secrets (MAIR-617).
+# Secret Manager vault of the instance secrets (MAIR-617), the operations runner (MAIR-803).
 name: Checks
 
 on:
@@ -156,3 +156,21 @@ jobs:
         run: ansible-playbook tests/vault_test.yml
       - name: Restore of the sealing keys (scw and ssh stubbed)
         run: bash tests/restore_sealing_keys_test.sh
+
+  ops-runner:
+    # MAIR-803: the Operations workflow runs only from main, after approval, through the
+    # wrapper; the wrapper always runs origin/main; sudoers and unit of role ops_runner.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install ansible-core and PyYAML
+        run: |
+          python3 -m venv "$RUNNER_TEMP/py"
+          "$RUNNER_TEMP/py/bin/pip" install ansible-core==2.20.7 pyyaml==6.0.3
+          echo "$RUNNER_TEMP/py/bin" >> "$GITHUB_PATH"
+      - name: Wrapper, pull request script, workflow guards and CI inventories
+        run: python -m unittest tests/test_ops_runner.py -v
+      - name: Render the sudoers file and the unit
+        run: ansible-playbook tests/ops_runner_test.yml
