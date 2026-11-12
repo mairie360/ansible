@@ -292,6 +292,49 @@
           vars:
             keys: "{{ vault_state.secrets | selectattr('id', 'equalto', 'id-keys') | first }}"
 
+        # Scaleway keeps 20 versions per secret: a run that would go past it
+        # must stop before writing anything, not after half of its versions.
+        - name: Fill admin-password up to 19 versions (it holds 1)
+          ansible.builtin.uri:
+            url: "{{ vault_api_url }}/secrets/id-admin/versions"
+            method: POST
+            headers:
+              X-Auth-Token: "{{ vault_auth.secret_key }}"
+            body_format: json
+            body: {data: "{{ 'old' | b64encode }}", description: "old {{ item }}"}
+          loop: "{{ range(2, 20) | list }}"
+          no_log: true
+
+        - name: Two versions that do not fit stop the play before writing
+          block:
+            - name: Write an archive and a new admin password
+              ansible.builtin.include_role:
+                name: k8s_instance_secrets
+                tasks_from: vault_write.yml
+              vars:
+                vault_writes:
+                  - {entry: admin-password, content: admin-old, description: MAIR-617 archived workstation:admin.txt~, archive: true}
+                  - {entry: admin-password, content: admin-new, description: sealed on mairie360/dev}
+
+            - name: Not reached
+              ansible.builtin.fail:
+                msg: write past the quota accepted
+          rescue:
+            - name: The play names the secret and the quota
+              ansible.builtin.assert:
+                that:
+                  - ansible_failed_result.msg is search('at most 20 versions per secret, nothing was written')
+                  - ansible_failed_result.msg is search('admin-password. 19 versions stored \+ 2 new > 20')
+                fail_msg: "{{ ansible_failed_result.msg | default('') }}"
+
+        - name: Read the stand-in state after the refused write
+          ansible.builtin.set_fact:
+            vault_state: "{{ lookup('ansible.builtin.file', test_dir.path ~ '/state.json') | from_json }}"
+
+        - name: No version was added
+          ansible.builtin.assert:
+            that: (vault_state.secrets | selectattr('id', 'equalto', 'id-admin') | first).versions | length == 19
+
         - name: An instance whose secrets Terraform did not create stops the play
           block:
             - name: Find the secrets of an instance missing from the vault

@@ -7,7 +7,34 @@
 # other data than written fails the play: the files it replaces are only
 # deleted after this. Archives (`archive: true`) are then disabled, so that
 # `latest_enabled` (scw CLI, console) is always the current value.
+# Nothing is written when one secret would go past vault_max_versions, the
+# Secret Manager quota: a run never stores half of what it planned.
 # =============================================================================
+
+- name: Count the versions of the secrets to write to
+  ansible.builtin.uri:
+    url: "{{ vault_api_url }}/secrets/{{ vault_ids[item] }}/versions?page_size=1"
+    headers:
+      X-Auth-Token: "{{ vault_auth.secret_key }}"
+    return_content: true
+  loop: "{{ vault_writes | map(attribute='entry') | unique | list }}"
+  delegate_to: localhost
+  become: false
+  register: vault_counts
+  no_log: true
+
+# Secret names and counts only.
+- name: Fail when a secret would go past the Secret Manager quota
+  ansible.builtin.assert:
+    that: vault_overflows | length == 0
+    quiet: true
+    fail_msg: >-
+      Scaleway Secret Manager keeps at most {{ vault_max_versions }} versions per secret, nothing was written:
+      {{ vault_overflows | join('; ') }}. Delete versions that are no longer needed
+      (scw secret version delete, never the current value nor a sealing key still in use),
+      or raise the quota through Scaleway support and set vault_max_versions (MAIR-617).
+  vars:
+    vault_overflows: "{{ vault_counts.results | default([]) | vault_quota_overflows(vault_writes, vault_max_versions) }}"
 
 - name: Add the versions to the vault
   ansible.builtin.uri:

@@ -49,9 +49,10 @@ deploiment_local_path: "{{ playbook_dir }}/../../Deploiment"
 #                    (MAIR-414);
 #   sealing-keys     the keys of the instance's sealed-secrets controller, one
 #                    version per key (description = the key's Secret name):
-#                    the controller adds a key every 30 days and keeps the old
-#                    ones, a single version would outgrow Secret Manager's
-#                    64 KiB. Without them, a reinstall makes every committed
+#                    the controller no longer renews its key (Deploiment,
+#                    keyrenewperiod "0"), so one version per instance unless a
+#                    key is rotated on purpose; a bundle of keys in a single
+#                    version would outgrow Secret Manager's 64 KiB. Without them, a reinstall makes every committed
 #                    secrets.yaml of the instance undecryptable.
 # The secrets themselves are created by Terraform (mairie360/Infra,
 # modules/instance), never by hand and never by this role: the role only adds
@@ -65,6 +66,12 @@ vault_entries:
   restic_password: restic-password
   admin_password: admin-password
   sealing_keys: sealing-keys
+# Versions Secret Manager keeps per secret, disabled ones included (Scaleway
+# quota, same at both account tiers; Support can raise it). The role checks it
+# before writing. The sealed-secrets controller no longer renews its key
+# (Deploiment bootstrap/addons/sealed-secrets, keyrenewperiod "0"), so
+# sealing-keys normally holds one version per instance.
+vault_max_versions: 20
 
 # Credentials of the vault, read on the controller, in this order:
 #   1. vault_project_id (inventory), else SCW_DEFAULT_PROJECT_ID, else the

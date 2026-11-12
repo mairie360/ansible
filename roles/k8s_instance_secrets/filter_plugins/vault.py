@@ -176,6 +176,26 @@ def vault_sealing_key_writes(cluster_keys, legacy_keys, stored, entry):
     return writes
 
 
+def vault_quota_overflows(listed, writes, limit):
+    """Secrets that `writes` would push past `limit` versions, as messages.
+
+    Scaleway Secret Manager keeps at most 20 versions per secret, disabled
+    ones included, and refuses the next one. Checked before writing anything,
+    so that a run never stores half of what it planned. `listed` are the
+    results of a loop over the written entries (item = secret name) of
+    GET /secrets/<id>/versions, whose `total_count` counts every version.
+    """
+    stored = {result.get("item"): int((result.get("json") or {}).get("total_count", 0)) for result in listed or []}
+    planned = {}
+    for write in writes or []:
+        planned[write["entry"]] = planned.get(write["entry"], 0) + 1
+    return [
+        f"{entry}: {stored.get(entry, 0)} versions stored + {count} new > {limit}"
+        for entry, count in sorted(planned.items())
+        if stored.get(entry, 0) + count > int(limit)
+    ]
+
+
 def vault_readback_mismatches(results):
     """Descriptions of the versions whose data read back differs from what was written.
 
@@ -201,5 +221,6 @@ class FilterModule:
             "vault_generated_writes": vault_generated_writes,
             "vault_current_revisions": vault_current_revisions,
             "vault_sealing_key_writes": vault_sealing_key_writes,
+            "vault_quota_overflows": vault_quota_overflows,
             "vault_readback_mismatches": vault_readback_mismatches,
         }
