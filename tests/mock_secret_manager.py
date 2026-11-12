@@ -13,7 +13,8 @@ JSON state file it rewrites after every write:
 State: {"secrets": [{"id", "name", "path", "project_id",
                      "versions": [{"revision", "data" (base64), "description",
                                    "status" (enabled | disabled, default enabled)}]}]}
-Requests without the expected X-Auth-Token get 401, like the real API.
+Requests without the expected X-Auth-Token get 401, like the real API, and a
+version past --max-versions (default 20, the Scaleway quota) gets 400.
 
     python3 tests/mock_secret_manager.py --port 18617 --token t --state state.json
 """
@@ -29,7 +30,7 @@ PREFIX = r"^/secret-manager/v1beta1/regions/[a-z-]+/secrets"
 LOCK = threading.Lock()
 
 
-def make_handler(token, state_path):
+def make_handler(token, state_path, max_versions=20):
     def load():
         with open(state_path) as f:
             return json.load(f)
@@ -125,6 +126,8 @@ def make_handler(token, state_path):
                 secret = self.secret(state, m.group(1))
                 if not secret:
                     return self.reply(404, {"message": "resource is not found"})
+                if len(secret["versions"]) >= max_versions:
+                    return self.reply(400, {"message": "quota exceeded", "resource": "secret_version"})
                 revision = len(secret["versions"]) + 1
                 secret["versions"].append(
                     {"revision": revision, "data": body["data"], "description": body.get("description", "")}
@@ -140,8 +143,9 @@ def main():
     parser.add_argument("--port", type=int, required=True)
     parser.add_argument("--token", required=True)
     parser.add_argument("--state", required=True)
+    parser.add_argument("--max-versions", type=int, default=20)
     args = parser.parse_args()
-    server = ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(args.token, args.state))
+    server = ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(args.token, args.state, args.max_versions))
     server.serve_forever()
 
 

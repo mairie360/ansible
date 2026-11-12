@@ -474,7 +474,9 @@
 # --- Sealing keys in the vault (MAIR-617) ---------------------------------------
 # Losing them makes every committed secrets.yaml of the instance
 # undecryptable after a reinstall. One version per key, its description being
-# the key's Secret name: the controller adds a key every 30 days.
+# the key's Secret name. The controller keeps a single key (renewal off in
+# Deploiment, keyrenewperiod "0"): a new version means a deliberate rotation
+# or a key found in the MAIR-599 backup. vault_write.yml checks the quota.
 
 - name: Read the instance sealing keys
   ansible.builtin.command: >
@@ -495,14 +497,6 @@
   become: false
   register: vault_sealing_versions
   no_log: true
-
-# One page of 100 versions: about eight years of monthly keys.
-- name: Fail when the sealing keys no longer fit in one page
-  ansible.builtin.assert:
-    that: vault_sealing_versions.json.total_count | int <= 100
-    fail_msg: >-
-      {{ vault_entries.sealing_keys }} has {{ vault_sealing_versions.json.total_count }}
-      versions: list them page by page before adding more (MAIR-617).
 
 - name: Check the local sealing key backup of MAIR-599
   ansible.builtin.stat:

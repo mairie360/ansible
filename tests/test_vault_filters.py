@@ -209,6 +209,34 @@ class SealingKeyWrites(unittest.TestCase):
         self.assertEqual(manifest["type"], "kubernetes.io/tls")
 
 
+class QuotaOverflows(unittest.TestCase):
+    """Scaleway keeps 20 versions per secret: never start a write it would refuse."""
+
+    def listed(self, **counts):
+        return [{"item": entry.replace("_", "-"), "json": {"total_count": n}} for entry, n in counts.items()]
+
+    def writes(self, entry, n):
+        return [{"entry": entry, "content": "c", "description": f"d{i}"} for i in range(n)]
+
+    def test_writes_up_to_the_limit_pass(self):
+        writes = self.writes("restic-password", 2) + self.writes("sealing-keys", 1)
+        self.assertEqual(vault.vault_quota_overflows(self.listed(restic_password=18, sealing_keys=0), writes, 20), [])
+
+    def test_every_secret_past_the_limit_is_reported(self):
+        writes = self.writes("admin-password", 2) + self.writes("sealing-keys", 1) + self.writes("restic-password", 1)
+        listed = self.listed(admin_password=19, sealing_keys=20, restic_password=3)
+        self.assertEqual(
+            vault.vault_quota_overflows(listed, writes, 20),
+            [
+                "admin-password: 19 versions stored + 2 new > 20",
+                "sealing-keys: 20 versions stored + 1 new > 20",
+            ],
+        )
+
+    def test_nothing_planned_never_overflows(self):
+        self.assertEqual(vault.vault_quota_overflows(self.listed(sealing_keys=25), [], 20), [])
+
+
 class ReadbackMismatches(unittest.TestCase):
     def result(self, written, read):
         return {"item": {"item": {"entry": "restic-password", "content": written, "description": "d"}}, "json": {"data": b64(read)}}

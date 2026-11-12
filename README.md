@@ -446,7 +446,7 @@ project of the group (`vault_project_id`, see below):
 | --- | --- | --- |
 | `restic-password` | `RESTIC_PASSWORD` of the backup bucket | every backup, if the instance or its sealing key is lost |
 | `admin-password` | plaintext first password of the town hall admin account (MAIR-170) | the first login: the instance only holds its argon2id hash (MAIR-414) |
-| `sealing-keys` | one version per sealing key of the instance (the controller adds one every 30 days) | every committed `secrets.yaml`, after a reinstall |
+| `sealing-keys` | one version per sealing key of the instance: a single one, the controller's renewal is off (Deploiment `keyrenewperiod: "0"`) | every committed `secrets.yaml`, after a reinstall |
 
 **The role never creates a secret.** Terraform does, from
 [`mairie360/Infra`](https://github.com/mairie360/Infra) (`orgs/<org>`,
@@ -461,6 +461,14 @@ key file and `RESTIC_PASSWORD` to rebuild a lost machine: without the sealing ke
 cannot be read at all. `scripts/restore-sealing-key-file.sh <key file> <ssh target of the instance>`
 puts the sealing keys of a key file back on a rebuilt machine, between phases 2 and 3 (it
 restarts the controller if it already runs).
+
+Secret Manager keeps **at most 20 versions per secret** (disabled ones
+included). Before adding versions the role counts them and, when one secret
+would go past `vault_max_versions` (20), stops without writing anything and
+names it: delete versions no longer needed (`scw secret version delete`, never
+the current value nor a sealing key still in use) or raise the quota through
+Scaleway support. Archived copies of MAIR-599 and deliberate key rotations are
+the only things that add versions after the first run.
 
 On every run, per generated value: what is already sealed on the instance wins,
 then the latest version in the vault, and only then a new hex value is
