@@ -498,6 +498,14 @@
   register: vault_sealing_versions
   no_log: true
 
+# A key outside the page read would be uploaded again as a new version.
+- name: Fail when the sealing keys do not fit in one page
+  ansible.builtin.assert:
+    that: vault_sealing_versions.json.total_count | int <= vault_sealing_versions.json.versions | length
+    fail_msg: >-
+      {{ vault_entries.sealing_keys }} has {{ vault_sealing_versions.json.total_count }} versions,
+      more than one page: delete the keys no longer needed first (MAIR-617).
+
 - name: Check the local sealing key backup of MAIR-599
   ansible.builtin.stat:
     path: "{{ legacy_sealing_keys_dir }}/{{ org_id }}-{{ env_name }}.yaml"

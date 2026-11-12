@@ -273,6 +273,28 @@
             that: vault_values.restic_password == 'restic-sealed'
             fail_msg: "{{ vault_values.restic_password | length }} characters read instead of restic-sealed"
 
+        # CodeRabbit on ansible#61: the next run also disables that archive,
+        # so the scw CLI's latest_enabled is the current value again.
+        - name: Read latest_enabled after the next run
+          ansible.builtin.uri:
+            url: "{{ vault_api_url }}/secrets/id-restic/versions/latest_enabled/access"
+            headers:
+              X-Auth-Token: "{{ vault_auth.secret_key }}"
+          register: healed_latest
+          no_log: true
+
+        - name: The stale archive is disabled and latest_enabled is the current value
+          ansible.builtin.assert:
+            that:
+              - healed_latest.json.data | b64decode == 'restic-sealed'
+              - (restic.versions | selectattr('revision', 'equalto', 3) | first).status == 'disabled'
+              - (restic.versions | selectattr('revision', 'equalto', 2) | first).status | default('enabled') == 'enabled'
+            fail_msg: "{{ restic.versions | map(attribute='status', default='enabled') | list }}"
+          vars:
+            restic: >-
+              {{ (lookup('ansible.builtin.file', test_dir.path ~ '/state.json') | from_json).secrets
+                 | selectattr('id', 'equalto', 'id-restic') | first }}
+
         - name: Upload the sealing keys twice
           ansible.builtin.include_tasks: tasks/vault_sealing_keys_run.yml
           loop: [first, second]

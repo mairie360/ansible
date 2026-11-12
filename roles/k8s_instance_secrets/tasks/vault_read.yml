@@ -3,7 +3,8 @@
 # in the vault (MAIR-617). The current version is the newest enabled one that
 # is not an archive of MAIR-599 (filter vault_current_revisions): reading
 # `latest_enabled` would return an archive left enabled by a run that stopped
-# between writing it and writing the current value.
+# between writing it and writing the current value. Archives such a run left
+# enabled are disabled here, so `latest_enabled` is the current value again.
 # Sets vault_values {restic_password, admin_password}, '' when absent.
 - name: List the versions of the generated secrets in the vault
   ansible.builtin.uri:
@@ -17,9 +18,36 @@
   register: vault_versions
   no_log: true
 
+# A version outside the page read could be the current one. Secret Manager
+# keeps 20 versions per secret unless Scaleway raised the quota.
+- name: Fail when a version listing does not fit in one page
+  ansible.builtin.assert:
+    that: vault_truncated | length == 0
+    quiet: true
+    fail_msg: >-
+      More than 100 versions in {{ vault_truncated | map('extract', vault_entries) | join(', ') }}:
+      delete the versions no longer needed before running the role again (MAIR-617).
+  vars:
+    vault_truncated: "{{ vault_versions.results | vault_truncated_listings }}"
+
 - name: Pick the current version of each generated secret
   ansible.builtin.set_fact:
     vault_revisions: "{{ vault_versions.results | vault_current_revisions(['restic_password', 'admin_password']) }}"
+  no_log: true
+
+- name: Disable the archives an interrupted run left enabled
+  ansible.builtin.uri:
+    url: "{{ vault_api_url }}/secrets/{{ vault_ids[vault_entries[item.key]] }}/versions/{{ item.revision }}/disable"
+    method: POST
+    headers:
+      X-Auth-Token: "{{ vault_auth.secret_key }}"
+    body_format: json
+    body: {}
+  loop: "{{ vault_versions.results | vault_stale_archives(['restic_password', 'admin_password'], vault_revisions) }}"
+  loop_control:
+    label: "{{ vault_entries[item.key] }} revision {{ item.revision }}"
+  delegate_to: localhost
+  become: false
   no_log: true
 
 - name: Read the generated secrets stored in the vault
