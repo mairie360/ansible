@@ -13,9 +13,9 @@ permissions:
 
 jobs:
   gdpr:
-    uses: mairie360/CICD/.github/workflows/gdpr-pr-cicd.yml@v5.2.2
+    uses: mairie360/CICD/.github/workflows/gdpr-pr-cicd.yml@v5.6.0
     with:
-      cicd_version: v5.2.2
+      cicd_version: v5.6.0
     # Only the secrets of the AI review: a pull request job gets nothing else.
     secrets:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
