@@ -1,7 +1,8 @@
 # Static checks of the repository: no public IP address in a tracked file (MAIR-708),
 # image-updater templates (MAIR-186, MAIR-444), ansible-lint, no secret logged, the
 # instance secrets rules and the followed images against Deploiment (MAIR-599),
-# no secret in new commits (MAIR-677), the promotion runner (MAIR-346).
+# no secret in new commits (MAIR-677), the promotion runner (MAIR-346), the
+# Secret Manager vault of the instance secrets (MAIR-617).
 name: Checks
 
 on:
@@ -136,3 +137,22 @@ jobs:
           "$RUNNER_TEMP/py/bin/pip" install pyyaml==6.0.3
       - name: Followed images match the deployed services
         run: '"$RUNNER_TEMP/py/bin/python" tests/check_image_updater_services.py deploiment'
+
+  vault:
+    # MAIR-617: the instance secrets live in Scaleway Secret Manager. The
+    # filters are unit-tested, then the role's vault tasks run against a local
+    # stand-in of the API (no Scaleway account used).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install ansible-core and PyYAML
+        run: |
+          python3 -m venv "$RUNNER_TEMP/py"
+          "$RUNNER_TEMP/py/bin/pip" install ansible-core==2.20.7 pyyaml==6.0.3
+          echo "$RUNNER_TEMP/py/bin" >> "$GITHUB_PATH"
+      - name: Unit tests of the vault filters
+        run: python -m unittest tests/test_vault_filters.py -v
+      - name: Vault tasks against the stand-in Secret Manager
+        run: ansible-playbook tests/vault_test.yml
+      - name: Restore of the sealing keys (scw and ssh stubbed)
+        run: bash tests/restore_sealing_keys_test.sh

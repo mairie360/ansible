@@ -1,0 +1,153 @@
+#!/usr/bin/env python3
+"""Local stand-in for the Scaleway Secret Manager API (MAIR-617 tests).
+
+Serves the calls the role k8s_instance_secrets makes, on 127.0.0.1, from a
+JSON state file it rewrites after every write:
+
+    GET  /secret-manager/v1beta1/regions/<r>/secrets?project_id=&path=
+    GET  /secret-manager/v1beta1/regions/<r>/secrets/<id>/versions
+    GET  /secret-manager/v1beta1/regions/<r>/secrets/<id>/versions/<rev>/access
+    POST /secret-manager/v1beta1/regions/<r>/secrets/<id>/versions
+    POST /secret-manager/v1beta1/regions/<r>/secrets/<id>/versions/<rev>/disable
+
+State: {"secrets": [{"id", "name", "path", "project_id",
+                     "versions": [{"revision", "data" (base64), "description",
+                                   "status" (enabled | disabled, default enabled)}]}]}
+Requests without the expected X-Auth-Token get 401, like the real API, and a
+version past --max-versions (default 20, the Scaleway quota) gets 400.
+
+    python3 tests/mock_secret_manager.py --port 18617 --token t --state state.json
+"""
+
+import argparse
+import json
+import re
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlparse
+
+PREFIX = r"^/secret-manager/v1beta1/regions/[a-z-]+/secrets"
+LOCK = threading.Lock()
+
+
+def make_handler(token, state_path, max_versions=20):
+    def load():
+        with open(state_path) as f:
+            return json.load(f)
+
+    def save(state):
+        with open(state_path, "w") as f:
+            json.dump(state, f, indent=2)
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def reply(self, status, body):
+            data = json.dumps(body).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def authorized(self):
+            if self.headers.get("X-Auth-Token") != token:
+                self.reply(401, {"message": "authentication is denied"})
+                return False
+            return True
+
+        def secret(self, state, secret_id):
+            return next((s for s in state["secrets"] if s["id"] == secret_id), None)
+
+        def do_GET(self):
+            if not self.authorized():
+                return
+            url = urlparse(self.path)
+            query = {k: v[0] for k, v in parse_qs(url.query).items()}
+            with LOCK:
+                state = load()
+            if re.match(PREFIX + r"$", url.path):
+                found = [
+                    {k: s[k] for k in ("id", "name", "path", "project_id")}
+                    for s in state["secrets"]
+                    if s["project_id"] == query.get("project_id")
+                    and ("path" not in query or s["path"] == query["path"])
+                ]
+                return self.reply(200, {"secrets": found, "total_count": len(found)})
+            m = re.match(PREFIX + r"/([^/]+)/versions$", url.path)
+            if m:
+                secret = self.secret(state, m.group(1))
+                if not secret:
+                    return self.reply(404, {"message": "resource is not found"})
+                versions = [
+                    {"revision": v["revision"], "description": v["description"], "status": v.get("status", "enabled")}
+                    for v in secret["versions"]
+                ]
+                return self.reply(200, {"versions": versions, "total_count": len(versions)})
+            m = re.match(PREFIX + r"/([^/]+)/versions/([^/]+)/access$", url.path)
+            if m:
+                secret = self.secret(state, m.group(1))
+                versions = secret["versions"] if secret else []
+                revision = m.group(2)
+                if revision == "latest":
+                    version = versions[-1] if versions else None
+                elif revision == "latest_enabled":
+                    enabled = [v for v in versions if v.get("status", "enabled") == "enabled"]
+                    version = enabled[-1] if enabled else None
+                else:
+                    version = next((v for v in versions if str(v["revision"]) == revision), None)
+                if not version:
+                    return self.reply(404, {"message": "resource is not found"})
+                return self.reply(200, {"secret_id": secret["id"], "revision": version["revision"], "data": version["data"]})
+            self.reply(404, {"message": "unknown route"})
+
+        def do_POST(self):
+            if not self.authorized():
+                return
+            url = urlparse(self.path)
+            body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
+            d = re.match(PREFIX + r"/([^/]+)/versions/([0-9]+)/disable$", url.path)
+            if d:
+                with LOCK:
+                    state = load()
+                    secret = self.secret(state, d.group(1))
+                    version = next((v for v in (secret or {}).get("versions", []) if str(v["revision"]) == d.group(2)), None)
+                    if not version:
+                        return self.reply(404, {"message": "resource is not found"})
+                    version["status"] = "disabled"
+                    save(state)
+                return self.reply(200, {"secret_id": secret["id"], "revision": version["revision"], "status": "disabled"})
+            m = re.match(PREFIX + r"/([^/]+)/versions$", url.path)
+            if not m:
+                return self.reply(404, {"message": "unknown route"})
+            with LOCK:
+                state = load()
+                secret = self.secret(state, m.group(1))
+                if not secret:
+                    return self.reply(404, {"message": "resource is not found"})
+                if len(secret["versions"]) >= max_versions:
+                    return self.reply(400, {"message": "quota exceeded", "resource": "secret_version"})
+                revision = len(secret["versions"]) + 1
+                secret["versions"].append(
+                    {"revision": revision, "data": body["data"], "description": body.get("description", "")}
+                )
+                save(state)
+            self.reply(200, {"secret_id": secret["id"], "revision": revision, "status": "enabled", "latest": True})
+
+    return Handler
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--port", type=int, required=True)
+    parser.add_argument("--token", required=True)
+    parser.add_argument("--state", required=True)
+    parser.add_argument("--max-versions", type=int, default=20)
+    args = parser.parse_args()
+    server = ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(args.token, args.state, args.max_versions))
+    server.serve_forever()
+
+
+if __name__ == "__main__":
+    main()

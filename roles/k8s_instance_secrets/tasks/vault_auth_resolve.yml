@@ -1,0 +1,27 @@
+---
+# Resolves vault_auth from facts only, so that tests/vault_test.yml runs it
+# without a scw configuration. Inputs: scw_env, scw_config (parsed scw CLI
+# configuration, {} when absent), vault_project_id.
+- name: Resolve the vault credentials
+  ansible.builtin.set_fact:
+    vault_auth:
+      secret_key: "{{ scw_env.secret_key | default(scw_profile.secret_key | default(''), true) }}"
+      project_id: >-
+        {{ vault_project_id
+           | default(scw_env.project_id, true)
+           | default(scw_profile.default_project_id | default(''), true) }}
+  vars:
+    scw_profile_name: "{{ scw_env.profile | default(scw_config.active_profile | default(''), true) }}"
+    scw_profile: >-
+      {{ scw_config | combine((scw_config.profiles | default({}))[scw_profile_name] | default({})) }}
+  no_log: true
+
+- name: Fail when the vault credentials are missing
+  ansible.builtin.assert:
+    that:
+      - vault_auth.secret_key | length > 0
+      - vault_auth.project_id | length > 0
+    quiet: true
+    fail_msg: >-
+      No Scaleway credentials for the vault (MAIR-617): run `scw init`, or
+      export SCW_SECRET_KEY and SCW_DEFAULT_PROJECT_ID.
