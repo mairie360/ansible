@@ -40,7 +40,9 @@ ProtectKernelLogs=true
 ProtectControlGroups=true
 ProtectClock=true
 ProtectHostname=true
-RestrictSUIDSGID=true
+# No RestrictSUIDSGID (MAIR-1003): with systemd 259 on kernel 7.0 its seccomp
+# filter answers ENOSYS to GNU tar, so no action could be extracted.
+# NoNewPrivileges=true already makes set-uid/set-gid bits ineffective here.
 RestrictNamespaces=true
 LockPersonality=true
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
