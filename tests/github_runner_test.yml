@@ -110,5 +110,8 @@
           - unit is search('(?m)^IPAddressAllow=10\\.10\\.0\\.3$')
           - unit is search('(?m)^User=gh-runner$')
           - unit is search('(?m)^NoNewPrivileges=true$')
+          # MAIR-1003: with systemd 259 on kernel 7.0 its seccomp filter answers ENOSYS to GNU
+          # tar, so the runner cannot extract any action (actions/checkout included).
+          - unit is not search('(?m)^RestrictSUIDSGID=')
           - unit is search('(?m)^InaccessiblePaths=-/root -/etc/gh-runner$')
         fail_msg: "{{ unit }}"
