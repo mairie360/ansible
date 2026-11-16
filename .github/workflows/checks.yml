@@ -1,7 +1,8 @@
 # Static checks of the repository: no public IP address in a tracked file (MAIR-708),
 # image-updater templates (MAIR-186, MAIR-444), ansible-lint, no secret logged, the
 # instance secrets rules and the followed images against Deploiment (MAIR-599),
-# no secret in new commits (MAIR-677), the promotion runner (MAIR-346).
+# no secret in new commits (MAIR-677), the promotion runner (MAIR-346), the phase tags
+# of site.yml (MAIR-244).
 name: Checks
 
 on:
@@ -109,6 +110,29 @@ jobs:
         run: pipx install ansible-core==2.20.7
       - name: Test the generated secrets and the first sealing
         run: ansible-playbook tests/seal_passwords_test.yml
+
+  site-phase-tags:
+    # MAIR-244: the disaster-recovery runbook runs site.yml phase by phase.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install ansible-core
+        run: pipx install ansible-core==2.20.7
+      - name: Each phase tag selects its play only
+        run: bash tests/mair_244_site_phase_tags_test.sh
+
+  restore-sealing-key:
+    # MAIR-244: the sealing key backup goes back on a rebuilt machine.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install PyYAML
+        run: |
+          python3 -m venv "$RUNNER_TEMP/py"
+          "$RUNNER_TEMP/py/bin/pip" install pyyaml==6.0.3
+          echo "$RUNNER_TEMP/py/bin" >> "$GITHUB_PATH"
+      - name: Restore the sealing keys of a key file
+        run: bash tests/mair_244_restore_sealing_key_test.sh
 
   image-updater-services:
     # MAIR-599: image_updater_services follows exactly the services Deploiment deploys.
