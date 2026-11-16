@@ -11,11 +11,12 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT" || exit 1
 FAILED=0
+ERR=$(mktemp); trap 'rm -f "$ERR"' EXIT
 
 # tasks_per_play <tags>: "<play name>=<number of selected tasks>", one per line.
 tasks_per_play() {
   ANSIBLE_INVENTORY_UNPARSED_WARNING=false ANSIBLE_LOCALHOST_WARNING=false \
-    ansible-playbook playbooks/site.yml --list-tasks --tags "$1" 2>/dev/null |
+    ansible-playbook playbooks/site.yml --list-tasks --tags "$1" 2>"$ERR" |
     awk '/^  play #/ { sub(/^  play #[0-9]+ \([^)]*\): /, ""); sub(/\t.*/, ""); play = $0; n[play] = 0; order[++k] = play; next }
          /^      [^ ]/ { n[play]++ }
          END { for (i = 1; i <= k; i++) print order[i] "=" n[order[i]] }'
@@ -26,7 +27,8 @@ expect() {
   local out line play count phase want
   out=$(tasks_per_play "$1")
   if [ "$(printf '%s\n' "$out" | grep -c .)" -ne 6 ]; then
-    echo "  FAIL  --tags $1: expected 6 plays, got:"; printf '%s\n' "$out"; FAILED=1; return
+    echo "  FAIL  --tags $1: expected 6 plays, got:"; printf '%s\n' "$out"
+    echo "  ansible-playbook stderr:"; cat "$ERR"; FAILED=1; return
   fi
   while IFS= read -r line; do
     play=${line%=*} count=${line##*=}
