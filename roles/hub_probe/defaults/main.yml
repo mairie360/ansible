@@ -1,0 +1,33 @@
+---
+# =============================================================================
+# External probe of the group (MAIR-621), on the group's Argo CD machine.
+#
+# An OpenTelemetry Collector (contrib build: httpcheck receiver) checks the
+# public URLs of every instance of the group each minute, from OUTSIDE the
+# instances, and pushes the results to the group's Cockpit source
+# <org>-probes (mairie360/Infra orgs/<org>/probes.tf). The alert rules
+# (Infra alerts/group/probes.yml) e-mail the team when a site stops answering,
+# and when the probe itself goes silent.
+# =============================================================================
+
+# OTLP push URL of the <org>-probes source: `scripts/tf.sh orgs/<org> output
+# -json probes | jq -r .metrics_endpoint` in mairie360/Infra. Not secret.
+# Empty = the probe is not installed (and is removed if it was).
+hub_probe_metrics_endpoint: ""
+hub_probe_enabled: "{{ hub_probe_metrics_endpoint | length > 0 }}"
+
+# Hosts probed on each instance of the group, as https://<host>.<instance_domain>/
+# (a front: it goes through the ingress, the TLS certificate and Next.js).
+hub_probe_hosts: [login]
+hub_probe_interval: 60s
+hub_probe_timeout: 10s
+
+hub_probe_namespace: hub-probe
+hub_probe_image: otel/opentelemetry-collector-contrib
+# Same collector version as Deploiment charts/observability.
+hub_probe_image_tag: "0.162.0"
+hub_probe_manifest: /opt/hub-probe/probe.yaml
+
+# Push-only token read from the vault (written by mairie360/Infra
+# scripts/issue-cockpit-tokens.sh <org> hub), never typed nor written here.
+hub_probe_vault_path: "/{{ org_id }}/hub"

@@ -1,0 +1,91 @@
+---
+# =============================================================================
+# External probe (MAIR-621), see defaults/main.yml. Runs on the group's Argo CD
+# machine (its own k3s), never on an instance: a probe on the instance would
+# die with it.
+# =============================================================================
+
+- name: Remove the probe (no hub_probe_metrics_endpoint)
+  ansible.builtin.command: kubectl delete namespace {{ hub_probe_namespace }} --ignore-not-found
+  register: hub_probe_removed
+  changed_when: "'deleted' in hub_probe_removed.stdout"
+  when: not hub_probe_enabled | bool
+
+- name: Stop here when the probe is disabled
+  ansible.builtin.meta: end_role
+  when: not hub_probe_enabled | bool
+
+- name: List the URLs to probe
+  ansible.builtin.set_fact:
+    hub_probe_urls: >-
+      {{ groups[org_group ~ '_instances'] | default([])
+         | map('extract', hostvars, 'instance_domain')
+         | hub_probe_urls(hub_probe_hosts) }}
+
+- name: Fail when the group has no instance to probe
+  ansible.builtin.assert:
+    that: hub_probe_urls | length > 0
+    quiet: true
+    fail_msg: "No instance_domain in group {{ org_group }}_instances: nothing to probe."
+
+# The vault tasks of k8s_instance_secrets, pointed at /<org>/hub.
+- name: Read the probe's Cockpit token from the vault
+  ansible.builtin.include_role:
+    name: k8s_instance_secrets
+    tasks_from: "{{ item }}"
+  vars:
+    vault_path: "{{ hub_probe_vault_path }}"
+    vault_entries: { cockpit_token: cockpit-token }
+    vault_value_keys: [cockpit_token]
+  loop: [vault_credentials.yml, vault_index.yml, vault_read.yml]
+
+- name: Fail when the probe has no token yet
+  ansible.builtin.assert:
+    that: vault_values.cockpit_token | length > 0
+    quiet: true
+    fail_msg: >-
+      {{ hub_probe_vault_path }}/cockpit-token is empty: run
+      `scripts/issue-cockpit-tokens.sh {{ org_id }} hub` in mairie360/Infra first.
+
+- name: Create the probe namespace
+  ansible.builtin.shell: |
+    set -o pipefail
+    kubectl create namespace {{ hub_probe_namespace }} --dry-run=client -o yaml | kubectl apply -f -
+  args:
+    executable: /bin/bash
+  register: hub_probe_ns
+  changed_when: "'created' in hub_probe_ns.stdout"
+
+- name: Store the probe's token
+  ansible.builtin.shell: |
+    set -o pipefail
+    kubectl -n {{ hub_probe_namespace }} create secret generic hub-probe-token \
+      --from-env-file=/dev/stdin --dry-run=client -o yaml | kubectl apply -f -
+  args:
+    executable: /bin/bash
+    stdin: "COCKPIT_TOKEN={{ vault_values.cockpit_token }}"
+  register: hub_probe_secret
+  changed_when: "'configured' in hub_probe_secret.stdout or 'created' in hub_probe_secret.stdout"
+  no_log: true
+
+- name: Create the manifest directory
+  ansible.builtin.file:
+    path: "{{ hub_probe_manifest | dirname }}"
+    state: directory
+    mode: "0700"
+
+- name: Write the probe manifest
+  ansible.builtin.template:
+    src: probe.yaml.j2
+    dest: "{{ hub_probe_manifest }}"
+    mode: "0600"
+
+- name: Apply the probe manifest
+  ansible.builtin.command: kubectl apply -f {{ hub_probe_manifest }}
+  register: hub_probe_apply
+  changed_when: "'configured' in hub_probe_apply.stdout or 'created' in hub_probe_apply.stdout"
+
+- name: Wait for the probe to run
+  ansible.builtin.command: >-
+    kubectl -n {{ hub_probe_namespace }} rollout status deployment/hub-probe --timeout=180s
+  changed_when: false
