@@ -56,7 +56,8 @@ Full procedure, verification and rollback: `docs/adr/0001-replace-ingress-nginx.
 in `Deploiment`. The ansible part:
 
 ```bash
-# 1. inventory/hosts.yml, on the instance host (dev first):
+# 1. inventory/hosts.example.yml, on the instance host (dev first), then
+#    `python3 scripts/restore-inventory.py --force` (MAIR-800):
 #      mairie360-dev:
 #        ...
 #        ingress_controller: traefik
@@ -313,6 +314,28 @@ cp inventory/hosts.yml /tmp/hosts.yml && git pull && mv /tmp/hosts.yml inventory
 # Already pulled: restore it from the history
 git show "$(git log -1 --format=%H --diff-filter=D -- inventory/hosts.yml)^:inventory/hosts.yml" > inventory/hosts.yml
 ```
+
+**Without access to the Terraform state** (MAIR-800), Scaleway knows the public address
+of each machine, so rebuild `inventory/hosts.yml` from `inventory/hosts.example.yml` and
+those addresses instead of asking around or digging in the git history:
+
+```bash
+scw init                                     # once: a Scaleway key with access to the project
+python3 scripts/restore-inventory.py         # writes inventory/hosts.yml
+python3 scripts/restore-inventory.py --check # compares an existing one with Scaleway
+python3 scripts/restore-inventory.py --force # replaces it (a machine got a new IP)
+```
+
+Each host is matched with the Scaleway server of the same name, or with its
+`scw_server` variable in the example (`mairie360-argocd` is the server
+`argocd hub`), and gets that server's public IPv4. The script refuses a path git
+tracks or does not ignore, never prints an address, and fails naming any host
+without a server. Everything else (groups, `wg_ip`, `env_name`, domains,
+`ingress_controller`) comes from the example: **change the example, then
+re-run the script**, never the generated file alone. A client whose machines are
+not in this Scaleway project needs its addresses written by hand. The Terraform route above stays the reference for the groups
+`mairie360/Infra` manages. `tests/restore_inventory_test.sh` (CI job
+`restore-inventory`) runs it against a fake `scw`.
 
 `python3 tests/check_no_public_ip.py` (also run by CI) fails when a tracked file
 holds a public IPv4 address; private and documentation ranges are allowed.

@@ -6,7 +6,8 @@
 # inventory/hosts.yml for the groups Terraform does not manage; the groups of
 # an org managed by mairie360/Infra are written by
 # scripts/inventory-from-terraform.py (MAIR-637, README "Usage").
-# ansible.cfg reads inventory/hosts.yml. The addresses below are
+# `python3 scripts/restore-inventory.py` (MAIR-800) rebuilds it from the Scaleway servers when
+# the Terraform state is out of reach. ansible.cfg reads inventory/hosts.yml. The addresses below are
 # documentation ones (RFC 5737), `wg_ip` are private WireGuard addresses.
 # tests/check_no_public_ip.py fails when a tracked file holds a public IP.
 #
@@ -32,6 +33,9 @@ all:
         mairie360-argocd:
           ansible_host: "203.0.113.10"
           wg_ip: "10.10.0.1"
+          # Scaleway server name, when it differs from the host name
+          # (scripts/restore-inventory.py, MAIR-800).
+          scw_server: "argocd hub"
 
     mairie360_instances:
       hosts:
