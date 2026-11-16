@@ -1,6 +1,6 @@
 ---
 # =============================================================================
-# Déploiement complet — toutes les machines, tous les groupes.
+# Full deployment: every machine, every group.
 #
 #   ansible-playbook playbooks/site.yml
 #   ansible-playbook playbooks/site.yml --limit mairie360_argocd:mairie360_instances
@@ -16,39 +16,51 @@
 # adding a client needs NO change here. Always --limit whole groups
 # (<org>_argocd:<org>_instances): the WireGuard phase needs every machine of
 # the group.
+#
+# Each play is tagged with its phase (phase1, phase1b, phase2, phase3, phase4,
+# phase5), so a disaster recovery can stop before phase 3 to put the old
+# sealing key back before Argo CD deploys the sealed-secrets controller
+# (MAIR-244, Deploiment docs/en/disaster-recovery.md):
+#
+#   ansible-playbook playbooks/site.yml --limit <org>_argocd:<org>_instances --tags phase1,phase1b,phase2
 # =============================================================================
 
-- name: "Phase 1 — socle système et k3s (toutes les machines)"
+- name: "Phase 1 — system base and k3s (every machine)"
   hosts: "*_argocd:*_instances"
   become: true
+  tags: [phase1]
   roles:
     - role: k8s_node
-      # Seules les instances exposent du HTTP(S) : ce sont elles qui portent
-      # les fronts. La machine Argo CD n'expose rien publiquement.
+      # Only the instances serve HTTP(S): they carry the fronts. The Argo CD
+      # machine exposes nothing publicly.
       node_public_ports: "{{ ['80', '443'] if inventory_hostname in groups[org_group ~ '_instances'] | default([]) else [] }}"
 
-- name: "Phase 1b — tunnel WireGuard du groupe"
+- name: "Phase 1b — WireGuard tunnel of the group"
   hosts: "*_argocd:*_instances"
   become: true
+  tags: [phase1b]
   roles:
     - wireguard
 
-- name: "Phase 2 — Argo CD du groupe"
+- name: "Phase 2 — Argo CD of the group"
   hosts: "*_argocd"
   become: true
+  tags: [phase2]
   # One group at a time: the GHCR credentials prompt is asked per group.
   serial: 1
   roles:
     - k8s_argocd
 
-- name: "Phase 3 — liaison des instances à leur Argo CD"
+- name: "Phase 3 — link the instances to their Argo CD"
   hosts: "*_instances"
   become: true
+  tags: [phase3]
   roles:
     - k8s_instance_link
 
 - name: "Phase 4 — instance secrets"
   ansible.builtin.import_playbook: secrets.yml
+  tags: [phase4]
 
 # MAIR-346: self-hosted runner of Deploiment's Promote workflow, on the Argo CD
 # machine of the groups that enable it. It needs the instance kubeconfigs of
@@ -59,6 +71,7 @@
   hosts: "*_argocd"
   become: true
   serial: 1
+  tags: [phase5]
   roles:
     - role: github_runner
       tags: [github_runner]

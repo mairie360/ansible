@@ -229,7 +229,17 @@ ansible-playbook playbooks/site.yml --limit 'client_example_argocd:client_exampl
 
 # Acceptance test (runs Deploiment/scripts/verify.sh from the Argo CD machine)
 ansible-playbook playbooks/verify.yml
+
+# One phase or a few: each play of site.yml carries its phase tag
+# (phase1, phase1b, phase2, phase3, phase4, phase5)
+ansible-playbook playbooks/site.yml --limit 'mairie360_argocd:mairie360_instances' --tags phase1,phase1b,phase2
 ```
+
+Rebuilding a lost machine (disaster recovery) does **not** run `site.yml` in one go:
+the old sealing key goes back on the machine between phases 2 and 3, and phase 4
+is skipped. Follow the runbook in `Deploiment`,
+[`docs/en/disaster-recovery.md`](https://github.com/mairie360/Deploiment/blob/main/docs/en/disaster-recovery.md)
+([French](https://github.com/mairie360/Deploiment/blob/main/docs/fr/disaster-recovery.md)).
 
 Then commit and push the generated secrets, which Argo CD deploys from git:
 
@@ -364,7 +374,19 @@ mode 700, files mode 600, outside any git repository):
 | `admin-<org>-<env>.txt` | plaintext first password of the town hall admin account (MAIR-170) | the first login: the instance only holds its argon2id hash (MAIR-414) |
 | `sealing-keys/<org>-<env>.yaml` | the instance sealing key | every committed `secrets.yaml`, after a reinstall |
 
-Store the three in the team vault. On every run, per value: what is already
+Store the three in the team vault (the shared password manager of the team, never a
+git repository nor a single workstation) after every phase 4 run. The sealing key file holds
+every key the controller has at that time: the controller renews its key every
+30 days (sealed-secrets default) and phase 4 seals with the newest one, so the copy
+must be at least as recent as the last committed `secrets.yaml`. They are what the disaster-recovery runbook of `Deploiment`
+(`docs/en/disaster-recovery.md`) needs to rebuild a lost machine: without the
+sealing key, every committed `secrets.yaml` of the instance has to be sealed again;
+without `RESTIC_PASSWORD`, the backups cannot be read at all.
+`scripts/restore-sealing-key-file.sh <key file> <ssh target of the instance>` puts the
+sealing keys of that file back on a rebuilt machine, between phases 2 and 3 (it
+restarts the controller if it already runs).
+
+On every run, per value: what is already
 sealed on the instance wins, then the backup file, and only then a new hex value
 is generated. A value sealed on the instance is **never** replaced (a new
 `RESTIC_PASSWORD` would make the bucket unreadable), not even by
