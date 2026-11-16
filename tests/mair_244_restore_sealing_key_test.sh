@@ -21,7 +21,9 @@ cat > "$WORK/bin/ssh" <<'SH'
 echo "$1 :: $2" >> "$WORK/calls"
 case "$2" in
   *" apply -f -") cat > "$WORK/applied.json" ;;
-  *"get deployment sealed-secrets-controller") [ "$CONTROLLER" = present ] ;;
+  *"get deployment sealed-secrets-controller --ignore-not-found -o name")
+    [ "$CONTROLLER" = unreachable ] && exit 255
+    [ "$CONTROLLER" = present ] && echo deployment.apps/sealed-secrets-controller; : ;;
 esac
 SH
 chmod +x "$WORK/bin/ssh"
@@ -86,6 +88,12 @@ grep -q "rollout restart" "$WORK/calls" && fail "restarted a controller that doe
 rm -f "$WORK/calls"
 CONTROLLER=present "$SCRIPT" "$WORK/keys.yaml" root@machine > "$WORK/out" 2>&1
 grep -q "rollout restart deployment sealed-secrets-controller" "$WORK/calls" && ok "controller restarted" || fail "controller not restarted"
+
+# 2b. The probe fails (SSH or kubectl error): the script fails, no restart and no
+# "run phase 3" that would leave a running controller without the restored keys.
+rm -f "$WORK/calls"
+if CONTROLLER=unreachable "$SCRIPT" "$WORK/keys.yaml" root@machine > "$WORK/out" 2>&1; then fail "a failed probe passed for a missing controller"; else ok "a failed probe stops the script"; fi
+grep -q "phase 3" "$WORK/out" && fail "advised phase 3 after a failed probe" || ok "no phase 3 advice after a failed probe"
 
 # 3. Refusals: nothing reaches the machine.
 rm -f "$WORK/calls"
