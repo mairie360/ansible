@@ -175,6 +175,53 @@ setting *Actions → Fork pull request workflows* must require approval for
 all outside collaborators. The sandbox and the admission policy bound what a
 hijacked job could do, but they are a second line, not the first.
 
+#### Creating the GitHub App (MAIR-799)
+
+On 2026-11-06 the runner did not exist because no App could register it, so
+the MAIR-794 fix had to be pushed straight onto `prod`. The App was created on
+2026-11-13 (MAIR-1003, App ID `5736830`, installed on `mairie360/Deploiment`).
+To create it again (new organization, lost App), an organization owner:
+
+1. *Organization settings → Developer settings → GitHub Apps → New GitHub App*.
+   Name e.g. `mairie360-promote-runner`, any homepage URL, **Webhook: Active
+   unchecked**.
+2. *Repository permissions → Administration: Read and write* (Metadata
+   read-only is added by GitHub). No other permission, no organization or
+   account permission, no event.
+3. *Where can this GitHub App be installed: Only on this account*. Create.
+4. Note the **App ID** at the top of the App page, then *Private keys →
+   Generate a private key*: the `.pem` downloads once. Keep it in the team's
+   password manager, never in a repository.
+5. *Install App* → the organization → *Only select repositories* →
+   `Deploiment`.
+6. Run phase 5 with both values (command above). Then check:
+   - on the machine, `systemctl status gh-runner` is `active` (or
+     `activating` between two jobs) and `journalctl -u gh-runner` shows
+     "registered ephemeral runner";
+   - on GitHub, *Deploiment → Settings → Actions → Runners* lists a runner
+     with the labels `self-hosted`, `linux`, `mairie360-argocd-mairie360`
+     (it appears per job, since every registration is just-in-time);
+   - `ansible-playbook playbooks/verify.yml --limit mairie360_argocd`
+     passes, then a Promote to staging followed by `target=prod` runs
+     `verify-staging` on it.
+
+**Renewing the App key.** Generate a new private key on the App page, re-run
+phase 5 with `GITHUB_RUNNER_APP_ID` and `GITHUB_RUNNER_APP_PRIVATE_KEY_FILE`
+pointing to it (the role replaces `/etc/gh-runner/app.pem` and restarts the
+service), check that the next job registers, then delete the old key on the
+App page. A key that leaked is deleted on the App page first: the runner stops
+registering until the new one is installed, nothing else breaks.
+
+**Troubleshooting.**
+
+| Symptom | Cause and fix |
+|---|---|
+| Promote waits forever on `verify-staging` ("Waiting for a runner") | `gh-runner` is not running or cannot register: `journalctl -u gh-runner`. A 401/404 from the token request means a wrong App ID, a deleted key or an App no longer installed on `Deploiment`. |
+| The role prompts for the App ID on every run | `/etc/gh-runner/app.pem` or `app-id` is missing on the machine: pass both variables once. |
+| `tar: …: Cannot mkdir: Function not implemented` while a job extracts an action | `RestrictSUIDSGID=` in the unit on systemd 259 / kernel 7.0 (fixed in MAIR-1003, `tests/github_runner_test.yml` pins it): re-run phase 5. |
+| `verify.sh` fails with `forbidden` on a resource | The runner's Role lacks a rule `verify.sh` started to use: add it to `roles/github_runner/templates/verify-rbac.yaml.j2` (one rule per step) and re-run phase 5. |
+| GitHub stopped sending jobs to the runner | The runner version is more than 30 days behind: bump `github_runner_version` / `github_runner_sha256`. |
+
 `playbooks/verify.yml` runs `verify.sh` on those environments **as
 `gh-runner` with its kubeconfig**, like the Promote workflow does, and fails
 when `gh-runner.service` is not active. On the machine:
