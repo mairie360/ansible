@@ -178,6 +178,9 @@
   gather_facts: false
   vars:
     max_handshake_age: "{{ verify_wg_handshake_max_seconds | default(600) }}"
+    # Same expression as the k8s_node parameter of site.yml (phase 1): verify.yml runs on its own, the
+    # value site.yml hands to the role does not reach it. Keep both in step.
+    node_public_ports: "{{ ['80', '443'] if inventory_hostname in groups[org_group ~ '_instances'] | default([]) else [] }}"
   tasks:
     - name: Collect the state of the machine
       ansible.builtin.shell:
@@ -187,6 +190,8 @@
           echo "ufw_default_incoming=$(ufw status verbose | awk '/^Default:/{print $2}')"
           # Rules open to everyone: "80/tcp ALLOW Anywhere" (the wg0 ones read "22/tcp on wg0 ALLOW ...").
           echo "ufw_public_ports=$(ufw status | awk '$2=="ALLOW" && $3=="Anywhere" && $1 ~ /^[0-9]/ {print $1}' | sort -u | paste -sd, -)"
+          # Application profiles open to everyone ("Samba ALLOW Anywhere", "Nginx Full ALLOW Anywhere"): no port number to compare.
+          echo "ufw_public_profiles=$(ufw status | sed -nE 's/^(.*[^ ]) +ALLOW +Anywhere *$/\1/p' | awk '$0 !~ /^[0-9]/ && $0 !~ / on /' | sort -u | paste -sd, -)"
           now=$(date +%s)
           wg show wg0 latest-handshakes 2>/dev/null | while read -r _ ts; do echo "wg_handshake_age=$((now - ts))"; done
           echo "k3s_version=$(k3s --version 2>/dev/null | awk 'NR==1{print $3}')"
@@ -238,12 +243,15 @@
   hosts: localhost
   connection: local
   gather_facts: false
-  vars_files:
-    - ../roles/k8s_instance_secrets/defaults/main.yml
+  vars:
+    # Default of sealing_keys_dir in roles/k8s_instance_secrets/defaults/main.yml. It is not loaded with
+    # vars_files: a play variable would win over the inventory, and an instance that sets its own
+    # sealing_keys_dir (host or group vars) must be checked where the secrets role wrote its key.
+    sealing_keys_default_dir: "{{ lookup('ansible.builtin.env', 'HOME') }}/.mairie360/sealing-keys"
   tasks:
     - name: Stat the sealing key of every instance
       ansible.builtin.stat:
-        path: "{{ sealing_keys_dir }}/{{ hostvars[item].org_id }}-{{ hostvars[item].env_name }}.yaml"
+        path: "{{ hostvars[item].sealing_keys_dir | default(sealing_keys_default_dir) }}/{{ hostvars[item].org_id }}-{{ hostvars[item].env_name }}.yaml"
       register: sealing_keys
       loop: "{{ groups.keys() | select('match', '.*_instances$') | map('extract', groups) | flatten }}"
       loop_control:

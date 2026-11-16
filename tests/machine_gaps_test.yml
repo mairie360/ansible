@@ -30,6 +30,7 @@
       - [ufw_status, inactive]
       - [ufw_default_incoming, allow]
       - [ufw_public_ports, "22/tcp,6443/tcp,51820/udp"]
+      - [ufw_public_profiles, "Nginx Full,Samba"]
       - [wg_handshake_age, "30"]
       - [wg_handshake_age, "9000"]
       - [k3s_version, "v1.34.1+k3s1"]
@@ -72,6 +73,8 @@
           - "'ufw-inactive' in degraded | map(attribute='id')"
           - "'ufw-default-incoming' in degraded | map(attribute='id')"
           - "'ufw-unexpected-port' in degraded | map(attribute='id')"
+          - "'ufw-public-profile' in degraded | map(attribute='id')"
+          - "'ufw-public-profile' not in healthy | map(attribute='id')"
           - "'wireguard-handshake' in degraded | map(attribute='id')"
           - "'k3s-version' in degraded | map(attribute='id')"
           - "'cilium-version' in degraded | map(attribute='id')"

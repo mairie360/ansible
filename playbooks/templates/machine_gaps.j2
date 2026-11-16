@@ -1,6 +1,6 @@
 {#- Machine checks of one machine (MAIR-242), rendered by playbooks/verify.yml as a YAML list of
     {id, message}. Inputs: state (pairs key=value collected on the machine) and the expectations:
-    expected_public_ports (list of "port/proto" open to everyone), expected_k3s_version,
+    expected_public_ports (list of "port/proto" open to everyone; the state also lists the ufw_public_profiles, application profiles open to everyone, none expected), expected_k3s_version,
     expected_cilium_version, expected_swap_mb, expected_wg_peers (0 = none expected),
     max_handshake_age (seconds). -#}
 {%- set ns = namespace(gaps=[]) -%}
@@ -15,6 +15,8 @@
 {%- set open_ports = (s.get('ufw_public_ports', '') | split(',') | reject('equalto', '') | sort | list) -%}
 {%- set unexpected = open_ports | difference(expected_public_ports) -%}
 {%- set missing = expected_public_ports | difference(open_ports) -%}
+{%- set profiles = (s.get('ufw_public_profiles', '') | split(',') | reject('equalto', '') | sort | list) -%}
+{%- if profiles | length > 0 -%}{%- set ns.gaps = ns.gaps + [{'id': 'ufw-public-profile', 'message': 'application profiles open to everyone, with ports no role opens: ' ~ profiles | join(', ')}] -%}{%- endif -%}
 {%- if unexpected | length > 0 -%}{%- set ns.gaps = ns.gaps + [{'id': 'ufw-unexpected-port', 'message': 'ports open to everyone that no role opens: ' ~ unexpected | join(', ')}] -%}{%- endif -%}
 {%- if missing | length > 0 -%}{%- set ns.gaps = ns.gaps + [{'id': 'ufw-missing-port', 'message': 'ports that should be open to everyone and are not: ' ~ missing | join(', ')}] -%}{%- endif -%}
 {%- if expected_wg_peers | int > 0 and hs.ages | length < expected_wg_peers | int -%}
