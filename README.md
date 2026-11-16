@@ -98,6 +98,12 @@ ansible-playbook playbooks/site.yml --limit 'mairie360_argocd:mairie360_instance
 ansible-playbook playbooks/verify.yml   # checks every cluster carries the expected annotation
 ```
 
+`verify.yml` also checks, on every machine, the UFW state and the ports open to everyone, the age of
+each WireGuard handshake (`verify_wg_handshake_max_seconds`, 600 by default), the k3s and Cilium
+versions against their pins, fail2ban and its sshd jail, the swap size, and, on the workstation,
+the local backup of each instance's sealing key (MAIR-242). The rules live in
+`playbooks/templates/machine_gaps.j2`; CI runs `--syntax-check`, `yamllint` and `ansible-lint`.
+
 ### Rollout of MAIR-346
 
 An annotated cluster reads `bootstrap/addons/` of `Deploiment` at its own
