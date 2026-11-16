@@ -108,3 +108,19 @@
         that:
           - "'staging' in deploiment_auto_sync_envs"
           - "'prod' not in deploiment_auto_sync_envs"
+
+    # MAIR-801: the ApplicationSet must automate exactly those environments.
+    # The list is rendered into a Go template (templatePatch), so read it back
+    # from there rather than trusting the variable alone.
+    - name: The ApplicationSet automates exactly deploiment_auto_sync_envs (MAIR-801)
+      ansible.builtin.assert:
+        that:
+          - automated_envs == deploiment_auto_sync_envs
+          - "'automated:' in appset.spec.templatePatch"
+          - "'selfHeal: true' in appset.spec.templatePatch"
+        fail_msg: "templatePatch automates {{ automated_envs }}: {{ appset.spec.templatePatch }}"
+      vars:
+        automated_envs: >-
+          {{ appset.spec.templatePatch
+             | regex_search('basename [(]list([^)]*)[)]', '\1') | first
+             | regex_findall('"([^"]+)"') }}
