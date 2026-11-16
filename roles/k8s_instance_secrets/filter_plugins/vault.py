@@ -233,6 +233,36 @@ def resolve_external_secrets(env_names, explicit, environment, vault_values, vau
     return resolved
 
 
+# MAIR-619: vault entry of each bucket key => the instance_secret_env keys its
+# JSON {"access_key", "secret_key"} fills. The keys are written by
+# mairie360/Infra (scripts/issue-bucket-keys.sh), only read here.
+BUCKET_KEY_FIELDS = {
+    "backup_s3_key": {"access_key": "backup_access_key_id", "secret_key": "backup_secret_access_key"},
+    "elearning_s3_key": {"access_key": "s3_access_key", "secret_key": "s3_secret_key"},
+}
+
+
+def vault_bucket_keys(vault_values):
+    """{instance_secret_env key: value} read from the bucket keys of the vault (MAIR-619).
+
+    A missing, empty or malformed version gives nothing for that bucket: the
+    other sources (variables, the instance, the prompts) then apply, as before.
+    Both halves of a key come from the same version or none does.
+    """
+    resolved = {}
+    for entry, fields in BUCKET_KEY_FIELDS.items():
+        raw = (vault_values or {}).get(entry) or ""
+        try:
+            pair = json.loads(raw) if raw else {}
+        except ValueError:
+            pair = {}
+        if not isinstance(pair, dict) or not all(isinstance(pair.get(f), str) and pair.get(f) for f in fields):
+            continue
+        for field, key in fields.items():
+            resolved[key] = pair[field]
+    return resolved
+
+
 def vault_external_finals(resolved, vault_keys):
     """{key: value} of the external secrets the vault must hold after this run.
 
@@ -290,6 +320,7 @@ class FilterModule:
             "vault_sealing_key_writes": vault_sealing_key_writes,
             "resolve_external_secrets": resolve_external_secrets,
             "vault_external_finals": vault_external_finals,
+            "vault_bucket_keys": vault_bucket_keys,
             "vault_quota_overflows": vault_quota_overflows,
             "vault_stale_archives": vault_stale_archives,
             "vault_truncated_listings": vault_truncated_listings,

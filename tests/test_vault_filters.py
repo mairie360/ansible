@@ -336,5 +336,43 @@ class ReadbackMismatches(unittest.TestCase):
         self.assertEqual(vault.vault_readback_mismatches(results), ["restic-password: d"])
 
 
+class BucketKeys(unittest.TestCase):
+    """MAIR-619: the per-bucket S3 keys mairie360/Infra writes into the vault."""
+
+    def test_each_bucket_key_fills_its_own_variables(self):
+        got = vault.vault_bucket_keys({
+            "backup_s3_key": '{"access_key": "SCWBACKUP", "secret_key": "bk"}',
+            "elearning_s3_key": '{"access_key": "SCWLEARN", "secret_key": "el"}',
+        })
+        self.assertEqual(got, {
+            "backup_access_key_id": "SCWBACKUP", "backup_secret_access_key": "bk",
+            "s3_access_key": "SCWLEARN", "s3_secret_key": "el",
+        })
+
+    def test_missing_empty_or_malformed_versions_give_nothing(self):
+        self.assertEqual(vault.vault_bucket_keys({}), {})
+        self.assertEqual(vault.vault_bucket_keys({"backup_s3_key": "", "elearning_s3_key": "not json"}), {})
+        self.assertEqual(vault.vault_bucket_keys({"backup_s3_key": '{"access_key": "SCWX"}'}), {},
+                         "never half a key")
+        self.assertEqual(vault.vault_bucket_keys({"backup_s3_key": '["SCWX", "s"]'}), {})
+
+    def test_vault_keys_fill_the_s3_secrets_but_variables_still_win(self):
+        names = ["s3_access_key", "s3_secret_key", "backup_access_key_id", "backup_secret_access_key"]
+        from_vault = vault.vault_bucket_keys({"elearning_s3_key": '{"access_key": "SCWLEARN", "secret_key": "el"}'})
+        got = vault.resolve_external_secrets(names, {}, {"s3_access_key": "SCWENV"}, from_vault, list(from_vault), "")
+        self.assertEqual(got["s3_access_key"], "SCWENV", "an explicit value still wins")
+        self.assertEqual(got["s3_secret_key"], "el")
+        self.assertEqual(got["backup_access_key_id"], "", "no backup key in the vault: other sources apply")
+
+    def test_bucket_keys_are_never_written_back(self):
+        defaults = yaml.safe_load((ROOT / "roles/k8s_instance_secrets/defaults/main.yml").read_text())
+        self.assertIn("backup_s3_key", defaults["vault_value_keys"])
+        self.assertIn("elearning_s3_key", defaults["vault_value_keys"])
+        self.assertNotIn("backup_s3_key", defaults["vault_external_keys"])
+        self.assertNotIn("elearning_s3_key", defaults["vault_external_keys"])
+        self.assertEqual(defaults["vault_entries"]["backup_s3_key"], "backup-s3-key", "name of mairie360/Infra modules/instance")
+        self.assertEqual(defaults["vault_entries"]["elearning_s3_key"], "elearning-s3-key")
+
+
 if __name__ == "__main__":
     unittest.main()
