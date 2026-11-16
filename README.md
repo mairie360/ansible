@@ -1,25 +1,25 @@
 # ansible
 
-Provisionnement des machines Mairie360. Ce dépôt **prépare les serveurs et
-amorce Kubernetes** ; l'état désiré des applications vit dans
+Provisioning of the Mairie360 machines. This repository **prepares the servers and
+bootstraps Kubernetes**; the desired state of the applications lives in
 [`mairie360/Deploiment`](https://github.com/mairie360/Deploiment).
 
-## Modèle
+## Model
 
-**Un Argo CD et une instance Mairie360 par machine.** Un *groupe* = un Argo CD
-+ ses instances.
+**One Argo CD or one Mairie360 instance per machine.** A *group* = one Argo CD
++ its instances.
 
 ```
-Groupe mairie360 (4 machines)      Groupe client-x (2 machines)
+Group mairie360 (4 machines)       Group client-x (2 machines)
   mairie360-argocd                   client-x-argocd
   mairie360-dev                      client-x-prod
   mairie360-staging
   mairie360-prod
 ```
 
-Chaque Argo CD ne pilote que les instances de son groupe, et son tunnel
-WireGuard ne porte que sur ce groupe. Un client compromis n'a aucune route
-réseau vers un autre : l'isolation vient de la topologie.
+Each Argo CD only drives the instances of its group, and its WireGuard tunnel
+only spans that group. A compromised client has no network route to another
+one: the isolation comes from the topology.
 
 ## The five phases
 
@@ -455,15 +455,15 @@ gap not listed in `gdpr_allowed_gaps` (group_vars, `id: reason`). The role `k8s_
 and bounds journald to `technical_logs_retention` (1 year by default), and the Hubble metrics no
 longer carry IP addresses.
 
-## Ajouter un client
+## Adding a client
 
-Trois fichiers, aucun playbook ni rôle à toucher :
+Three files, no playbook or role to touch:
 
-1. `inventory/hosts.yml` (local, gitignored) — les groupes `client_x_argocd` et `client_x_instances` ;
-   ajouter aussi le modèle dans `inventory/hosts.example.yml` avec des adresses de documentation
-2. `inventory/group_vars/client_x_argocd.yml` et `inventory/group_vars/client_x_instances.yml` —
-   une ligne : `org_id: client-x`
-3. dans `Deploiment` : `clusters/client-x/instances/prod/values.yaml`
+1. `inventory/hosts.yml` (local, gitignored): the `client_x_argocd` and `client_x_instances` groups;
+   also add the pattern to `inventory/hosts.example.yml` with documentation addresses
+2. `inventory/group_vars/client_x_argocd.yml` and `inventory/group_vars/client_x_instances.yml`:
+   one line, `org_id: client-x`
+3. in `Deploiment`: `clusters/client-x/instances/prod/values.yaml`
 
 ## Network observability (Cilium / Hubble)
 
@@ -536,36 +536,35 @@ default (`Endpoints`, `Lease`, `CiliumIdentity`, `CiliumEndpoint`; not
 `CiliumNetworkPolicy`). None of those is used by
 `Deploiment` today.
 
-## Conventions qui comptent
+## Conventions that matter
 
-**`org_id` garde les tirets** (`client-example`) parce qu'il doit correspondre
-au dossier `clusters/<org_id>/` de `Deploiment`. Les noms de groupes Ansible
-n'acceptent que des underscores. `org_group` (défini dans `inventory/group_vars/all.yml`)
-fait le pont — c'est lui qu'il faut utiliser dans `groups[...]`, jamais
-`org_id`.
+**`org_id` keeps its dashes** (`client-example`) because it must match the
+`clusters/<org_id>/` folder of `Deploiment`. Ansible group names only accept
+underscores. `org_group` (defined in `inventory/group_vars/all.yml`) is the
+bridge: use it in `groups[...]`, never `org_id`.
 
-**`env_name` est le nom du cluster dans Argo CD.** L'ApplicationSet cible
-`destination.name: '{{ .path.basename }}'`, donc le nom du dossier
-`clusters/<org>/instances/<env>/`. Un enregistrement sous un autre nom (comme
-`inventory_hostname`) produit une Application bloquée en « cluster does not
-exist », sans autre symptôme. Le rôle `k8s_instance_link` force le bon nom.
+**`env_name` is the name of the cluster in Argo CD.** The ApplicationSet targets
+`destination.name: '{{ .path.basename }}'`, hence the name of the
+`clusters/<org>/instances/<env>/` folder. Registering it under another name (such
+as `inventory_hostname`) leaves the Application stuck on "cluster does not
+exist", with no other symptom. The `k8s_instance_link` role enforces the right name.
 
-**Le label `mairie360.fr/role=instance`** distingue une instance de la machine
-Argo CD. Les AppSets du socle le sélectionnent : sans lui, aucun socle n'est
-déployé sur l'instance.
+**The `mairie360.fr/role=instance` label** tells an instance from the Argo CD
+machine. The bootstrap AppSets select it: without it, no bootstrap layer is
+deployed on the instance.
 
 **`ansible_host` is for SSH, `wg_ip` is for Argo CD.** Port 6443 gives
 administrator access: it is only open on `wg0`, and only to the group's
 Argo CD tunnel IP, never to the Internet.
 
-## Fermeture du SSH public
+## Closing the public SSH
 
-`k8s_node` laisse volontairement le port 22 ouvert : couper le SSH public avant
-d'avoir validé le tunnel verrouillerait la machine. Une fois la connexion par
-l'IP WireGuard confirmée :
+`k8s_node` leaves port 22 open on purpose: cutting the public SSH before the
+tunnel is validated would lock the machine out. Once the connection through the
+WireGuard IP is confirmed:
 
 ```bash
 ansible-playbook playbooks/site.yml -e wireguard_close_public_ssh=true
 ```
 
-Le rôle vérifie que le tunnel répond avant de retirer la règle.
+The role checks that the tunnel answers before removing the rule.
