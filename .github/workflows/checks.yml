@@ -245,5 +245,7 @@ jobs:
           echo "$RUNNER_TEMP/py/bin" >> "$GITHUB_PATH"
       - name: Wrapper, pull request script, workflow guards and CI inventories
         run: python -m unittest tests/test_ops_runner.py -v
+      - name: inventory/hosts.yml from the Terraform outputs (MAIR-637)
+        run: python -m unittest tests/test_inventory_from_terraform.py -v
       - name: Render the sudoers file and the unit
         run: ansible-playbook tests/ops_runner_test.yml

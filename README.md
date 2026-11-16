@@ -285,13 +285,25 @@ Clone `Deploiment` next to this repo (`Devops/ansible` + `Devops/Deploiment`):
 phase 4 writes each instance's `secrets.yaml` there.
 
 The real inventory is local (MAIR-708): this repository is public and must not
-publish the machines' addresses, so `inventory/hosts.yml` is gitignored. Create it
-from the template and fill in the real addresses (ask the team for the current
-file; it will move to a private source later):
+publish the machines' addresses, so `inventory/hosts.yml` is gitignored. It is
+generated from Terraform (MAIR-637): the public addresses come from the
+`ansible_hosts` output of [`mairie360/Infra`](https://github.com/mairie360/Infra)
+(the machines are imported there), everything else about a host (`wg_ip`,
+`env_name`, `instance_domain`, `ingress_controller`) from the tracked
+`inventory/ci-<org>.yml`:
 
 ```bash
-cp inventory/hosts.example.yml inventory/hosts.yml
+# in Devops/Infra (scw CLI profile of the project)
+scripts/tf.sh orgs/mairie360 output -json ansible_hosts > /tmp/hosts.json
+# here: writes (or updates) the groups mairie360_argocd / mairie360_instances
+scripts/inventory-from-terraform.py --org mairie360 /tmp/hosts.json && rm /tmp/hosts.json
 ```
+
+Re-run it after any machine change instead of editing those groups. It keeps the
+other groups, the top-level `vars` and extra per-host keys already in
+`hosts.yml`, drops hosts Terraform no longer has, and writes nothing when
+Terraform and `inventory/ci-<org>.yml` do not list the same hosts. A new host is
+added to `inventory/ci-<org>.yml` (and `orgs/<org>/` of Infra) first.
 
 Existing checkout that still tracks `inventory/hosts.yml`: pulling the MAIR-708 commit
 deletes it. Save it first, then put it back (it is ignored by git afterwards):
