@@ -60,8 +60,11 @@ count=$(printf '%s' "$manifest" | python3 -c 'import json,sys; print(len(json.lo
 # shellcheck disable=SC2029 # kubectl_cmd is meant to expand on the client side
 printf '%s' "$manifest" | ssh "$target" "$kubectl_cmd apply -f -"
 # A controller that already runs only reads its keys at start.
+# --ignore-not-found: a missing controller prints nothing and exits 0, so an SSH or kubectl
+# failure stops the script (set -e) instead of passing for "no controller yet".
 # shellcheck disable=SC2029
-if ssh "$target" "$kubectl_cmd -n kube-system get deployment sealed-secrets-controller" >/dev/null 2>&1; then
+running=$(ssh "$target" "$kubectl_cmd -n kube-system get deployment sealed-secrets-controller --ignore-not-found -o name")
+if [ -n "$running" ]; then
   ssh "$target" "$kubectl_cmd -n kube-system rollout restart deployment sealed-secrets-controller"
   echo "$count sealing key(s) restored, sealed-secrets-controller restarted."
 else
