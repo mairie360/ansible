@@ -311,6 +311,16 @@ class CiInventory(unittest.TestCase):
                 self.assertIn("instance_domain", host)
             self.assertEqual(len({h["env_name"] for h in instances.values()}), len(instances))
 
+    def test_ci_inventory_domains_match_the_example_inventory(self):
+        # The CI inventory once gave prod the apex mairie360-eip.fr while the instance (and
+        # Deploiment's global.domain) is prod.mairie360-eip.fr: same hosts, same settings.
+        example = yaml.safe_load((REPO / "inventory/hosts.example.yml").read_text())["all"]["children"]
+        ci = yaml.safe_load((REPO / "inventory/ci-mairie360.yml").read_text())["all"]["children"]
+        for name, host in ci["mairie360_instances"]["hosts"].items():
+            ref = example["mairie360_instances"]["hosts"][name]
+            for key in ("wg_ip", "env_name", "instance_domain", "ingress_controller"):
+                self.assertEqual(host[key], ref[key], f"{name}.{key}")
+
 
 if __name__ == "__main__":
     unittest.main()
