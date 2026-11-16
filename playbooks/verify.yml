@@ -190,8 +190,8 @@
           echo "ufw_default_incoming=$(ufw status verbose | awk '/^Default:/{print $2}')"
           # Rules open to everyone: "80/tcp ALLOW Anywhere" (the wg0 ones read "22/tcp on wg0 ALLOW ...").
           echo "ufw_public_ports=$(ufw status | awk '$2=="ALLOW" && $3=="Anywhere" && $1 ~ /^[0-9]/ {print $1}' | sort -u | paste -sd, -)"
-          # Application profiles open to everyone ("Samba ALLOW Anywhere", "Nginx Full ALLOW Anywhere"): no port number to compare.
-          echo "ufw_public_profiles=$(ufw status | sed -nE 's/^(.*[^ ]) +ALLOW +Anywhere *$/\1/p' | awk '$0 !~ /^[0-9]/ && $0 !~ / on /' | sort -u | paste -sd, -)"
+          # Application profiles open to everyone ("Samba ALLOW Anywhere", "Nginx Full ALLOW Anywhere # note"): no port number to compare.
+          echo "ufw_public_profiles=$(ufw status | sed -nE 's/^(.*[^ ]) +ALLOW +Anywhere( +#.*)? *$/\1/p' | awk '$0 !~ /^[0-9]/ && $0 !~ / on /' | sort -u | paste -sd, -)"
           now=$(date +%s)
           wg show wg0 latest-handshakes 2>/dev/null | while read -r _ ts; do echo "wg_handshake_age=$((now - ts))"; done
           echo "k3s_version=$(k3s --version 2>/dev/null | awk 'NR==1{print $3}')"

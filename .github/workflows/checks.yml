@@ -123,6 +123,8 @@ jobs:
         run: pipx install ansible-core==2.20.7
       - name: Render the machine gaps
         run: ansible-playbook tests/machine_gaps_test.yml
+      - name: Collect the public UFW profiles
+        run: bash tests/ufw_public_profiles_test.sh
       - name: Install PyYAML
         run: |
           python3 -m venv "$RUNNER_TEMP/py"
