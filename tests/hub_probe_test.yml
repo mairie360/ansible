@@ -54,13 +54,16 @@
         base_checksum: "{{ deployment.spec.template.metadata.annotations['mairie360.fr/config'] }}"
         revision: "{{ deployment.spec.template.metadata.annotations['mairie360.fr/token-revision'] }}"
 
-    - name: Re-render with another interval, timeout and token revision
+    # include_vars outranks task vars: the other settings go through set_fact.
+    - name: Change the interval, the timeout and the token revision
       ansible.builtin.set_fact:
-        other: "{{ lookup('ansible.builtin.template', '../roles/hub_probe/templates/probe.yaml.j2') | from_yaml_all | list }}"
-      vars:
         hub_probe_interval: 17s
         hub_probe_timeout: 7s
         hub_probe_secret_revision: "4242"
+
+    - name: Re-render with the other settings
+      ansible.builtin.set_fact:
+        other: "{{ lookup('ansible.builtin.template', '../roles/hub_probe/templates/probe.yaml.j2') | from_yaml_all | list }}"
 
     - name: The annotations changed
       ansible.builtin.assert:
