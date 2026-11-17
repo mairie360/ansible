@@ -86,6 +86,7 @@
   hosts: "*_argocd"
   become: true
   serial: 1
+  tags: [phase6]
   roles:
     - role: ops_runner
       tags: [ops_runner]
