@@ -3,8 +3,10 @@
 #
 # The real inventory, inventory/hosts.yml, is gitignored: this repository is
 # public and must not publish the addresses of the machines. Copy this file to
-# inventory/hosts.yml and put the real addresses there (ask the team for the
-# current one); ansible.cfg reads inventory/hosts.yml. The addresses below are
+# inventory/hosts.yml for the groups Terraform does not manage; the groups of
+# an org managed by mairie360/Infra are written by
+# scripts/inventory-from-terraform.py (MAIR-637, README "Usage").
+# ansible.cfg reads inventory/hosts.yml. The addresses below are
 # documentation ones (RFC 5737), `wg_ip` are private WireGuard addresses.
 # tests/check_no_public_ip.py fails when a tracked file holds a public IP.
 #
