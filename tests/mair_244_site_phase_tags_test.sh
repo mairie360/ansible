@@ -26,8 +26,8 @@ tasks_per_play() {
 expect() {
   local out line play count phase want
   out=$(tasks_per_play "$1")
-  if [ "$(printf '%s\n' "$out" | grep -c .)" -ne 8 ]; then
-    echo "  FAIL  --tags $1: expected 8 plays, got:"; printf '%s\n' "$out"
+  if [ "$(printf '%s\n' "$out" | grep -c .)" -ne 9 ]; then
+    echo "  FAIL  --tags $1: expected 9 plays, got:"; printf '%s\n' "$out"
     echo "  ansible-playbook stderr:"; cat "$ERR"; FAILED=1; return
   fi
   while IFS= read -r line; do
@@ -56,5 +56,17 @@ expect ops_runner "6"
 # Phase 7, the external probe of MAIR-621 (also tag hub_probe).
 expect phase7 "7"
 expect hub_probe "7"
+# Phase 8, the n8n machine host base of MAIR-1075 (also tag n8n_node).
+expect phase8 "8"
+expect n8n_node "8"
+
+# The example inventory defines the n8n group of phase 8 (MAIR-1075): the task-list checks above
+# do not see whether a host is in it.
+if ANSIBLE_INVENTORY_UNPARSED_WARNING=false ansible-inventory -i inventory/hosts.example.yml --list 2>"$ERR" |
+  python3 -c 'import json,sys; sys.exit(0 if json.load(sys.stdin)["mairie360_n8n"]["hosts"] == ["mairie360-n8n"] else 1)'; then
+  echo "  done  mairie360_n8n holds mairie360-n8n"
+else
+  echo "  FAIL  mairie360_n8n does not hold mairie360-n8n in inventory/hosts.example.yml"; FAILED=1
+fi
 
 [ "$FAILED" -eq 0 ] && echo "OK" || { echo "FAILED"; exit 1; }

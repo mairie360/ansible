@@ -77,6 +77,19 @@ all:
     #       env_name: prod
     #       instance_domain: "mairie360.ville-exemple.fr"
 
+
+    # ---------------------------------------------------------------- n8n (MAIR-1075)
+    # The automation machine: in the platform's Terraform, but no k3s, no
+    # WireGuard, no Argo CD, so no `<org>_argocd` / `<org>_instances` group and
+    # no `wg_ip`. Only the `n8n_node` role (phase 8) targets it. Its address
+    # comes from `terraform output n8n_machine` of mairie360/Infra.
+    mairie360_n8n:
+      hosts:
+        mairie360-n8n:
+          ansible_host: "203.0.113.14"
+          # Scaleway server name (scripts/restore-inventory.py, MAIR-800).
+          scw_server: "mairie360 n8n"
+
   vars:
     ansible_user: ubuntu
     ansible_ssh_private_key_file: "~/.ssh/login_scaleway_mairie360"

@@ -52,17 +52,17 @@ python3 "$SCRIPT" > "$TMP/out" 2>&1; code=$?
 ok "$([ "$code" != 0 ] && grep -q 'already exists' "$TMP/out" && echo 0 || echo 1)" "refuses to overwrite without --force"
 python3 "$SCRIPT" --check > "$TMP/out" 2>&1; ok "$?" "--check passes when the addresses match"
 
-echo "[$(server 'argocd hub' 192.0.2.10), $(server mairie360-dev 192.0.2.21), $(server mairie360-staging 192.0.2.12), $(server mairie360-prod 192.0.2.13)]" > "$SCW_JSON"
+echo "[$(server 'argocd hub' 192.0.2.10), $(server mairie360-dev 192.0.2.21), $(server mairie360-staging 192.0.2.12), $(server mairie360-prod 192.0.2.13), $(server 'mairie360 n8n' 192.0.2.99)]" > "$SCW_JSON"
 python3 "$SCRIPT" --check > "$TMP/out" 2>&1; code=$?
 ok "$([ "$code" != 0 ] && grep -q 'differs from Scaleway (or is missing) for: mairie360-dev' "$TMP/out" && echo 0 || echo 1)" "--check names a machine whose address changed"
 python3 "$SCRIPT" --force > "$TMP/out" 2>&1
 ok "$([ "$(host_ip mairie360_instances mairie360-dev)" = 192.0.2.21 ] && echo 0 || echo 1)" "--force replaces it"
 
-echo "[$(server 'argocd hub' 192.0.2.10), $(server mairie360-dev 192.0.2.11), $(server mairie360-prod 192.0.2.13)]" > "$SCW_JSON"
+echo "[$(server 'argocd hub' 192.0.2.10), $(server mairie360-dev 192.0.2.11), $(server mairie360-prod 192.0.2.13), $(server 'mairie360 n8n' 192.0.2.99)]" > "$SCW_JSON"
 python3 "$SCRIPT" --force > "$TMP/out" 2>&1; code=$?
 ok "$([ "$code" != 0 ] && grep -q "mairie360-staging (server 'mairie360-staging')" "$TMP/out" && echo 0 || echo 1)" "fails naming a host with no Scaleway server"
 
-echo "[$(server 'argocd hub' 192.0.2.10), $(server mairie360-dev 192.0.2.11), $(server mairie360-dev 192.0.2.31), $(server mairie360-staging 192.0.2.12), $(server mairie360-prod 192.0.2.13)]" > "$SCW_JSON"
+echo "[$(server 'argocd hub' 192.0.2.10), $(server mairie360-dev 192.0.2.11), $(server mairie360-dev 192.0.2.31), $(server mairie360-staging 192.0.2.12), $(server mairie360-prod 192.0.2.13), $(server 'mairie360 n8n' 192.0.2.99)]" > "$SCW_JSON"
 python3 "$SCRIPT" --force > "$TMP/out" 2>&1; code=$?
 ok "$([ "$code" != 0 ] && grep -q "several servers are named 'mairie360-dev'" "$TMP/out" && echo 0 || echo 1)" "an ambiguous server name is refused"
 
