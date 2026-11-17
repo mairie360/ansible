@@ -54,20 +54,24 @@
     port: "{{ item }}"
     proto: tcp
   loop: "{{ n8n_node_public_ports }}"
+  when: not (ansible_check_mode and n8n_node_packages is changed)
 
 - name: Refuse incoming traffic by default
   community.general.ufw:
     direction: incoming
     policy: deny
+  when: not (ansible_check_mode and n8n_node_packages is changed)
 
 - name: Allow outgoing traffic by default
   community.general.ufw:
     direction: outgoing
     policy: allow
+  when: not (ansible_check_mode and n8n_node_packages is changed)
 
 - name: Enable UFW
   community.general.ufw:
     state: enabled
+  when: not (ansible_check_mode and n8n_node_packages is changed)
 
 - name: Configure fail2ban for SSH
   ansible.builtin.copy:
@@ -95,6 +99,9 @@
     content: |
       APT::Periodic::Update-Package-Lists "1";
       APT::Periodic::Unattended-Upgrade "1";
+
+- name: Apply the pending service restarts before inspecting the stack
+  ansible.builtin.meta: flush_handlers
 
 # --- The stack is there (read-only) -------------------------------------------
 

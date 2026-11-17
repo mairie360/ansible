@@ -60,4 +60,13 @@ expect hub_probe "7"
 expect phase8 "8"
 expect n8n_node "8"
 
+# The example inventory defines the n8n group of phase 8 (MAIR-1075): the task-list checks above
+# do not see whether a host is in it.
+if ANSIBLE_INVENTORY_UNPARSED_WARNING=false ansible-inventory -i inventory/hosts.example.yml --list 2>"$ERR" |
+  python3 -c 'import json,sys; sys.exit(0 if json.load(sys.stdin)["mairie360_n8n"]["hosts"] == ["mairie360-n8n"] else 1)'; then
+  echo "  done  mairie360_n8n holds mairie360-n8n"
+else
+  echo "  FAIL  mairie360_n8n does not hold mairie360-n8n in inventory/hosts.example.yml"; FAILED=1
+fi
+
 [ "$FAILED" -eq 0 ] && echo "OK" || { echo "FAILED"; exit 1; }

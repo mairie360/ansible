@@ -77,9 +77,6 @@ all:
     #       env_name: prod
     #       instance_domain: "mairie360.ville-exemple.fr"
 
-  vars:
-    ansible_user: ubuntu
-    ansible_ssh_private_key_file: "~/.ssh/login_scaleway_mairie360"
 
     # ---------------------------------------------------------------- n8n (MAIR-1075)
     # The automation machine: in the platform's Terraform, but no k3s, no
@@ -90,3 +87,9 @@ all:
       hosts:
         mairie360-n8n:
           ansible_host: "203.0.113.14"
+          # Scaleway server name (scripts/restore-inventory.py, MAIR-800).
+          scw_server: "mairie360 n8n"
+
+  vars:
+    ansible_user: ubuntu
+    ansible_ssh_private_key_file: "~/.ssh/login_scaleway_mairie360"
