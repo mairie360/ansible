@@ -159,6 +159,9 @@
             {"id": "id-resend", "name": "resend-api-key", "path": "/mairie360/dev", "project_id": "test-project",
              "versions": [{"revision": 1, "data": "{{ 're-in-vault' | b64encode }}", "description": "MAIR-617 sealed on mairie360/dev"}]},
             {"id": "id-cockpit", "name": "cockpit-token", "path": "/mairie360/dev", "project_id": "test-project", "versions": []},
+            {"id": "id-backup-key", "name": "backup-s3-key", "path": "/mairie360/dev", "project_id": "test-project",
+             "versions": [{"revision": 1, "data": "{{ '{"access_key": "SCWBACKUP", "secret_key": "bk-secret"}' | b64encode }}", "description": "SCWBACKUP"}]},
+            {"id": "id-elearning-key", "name": "elearning-s3-key", "path": "/mairie360/dev", "project_id": "test-project", "versions": []},
             {"id": "id-prod", "name": "restic-password", "path": "/mairie360/prod", "project_id": "test-project", "versions": []}
           ]}
 
@@ -189,7 +192,8 @@
           ansible.builtin.assert:
             that: >-
               vault_ids == {'restic-password': 'id-restic', 'admin-password': 'id-admin', 'sealing-keys': 'id-keys',
-                            'resend-api-key': 'id-resend', 'cockpit-token': 'id-cockpit'}
+                            'resend-api-key': 'id-resend', 'cockpit-token': 'id-cockpit',
+                            'backup-s3-key': 'id-backup-key', 'elearning-s3-key': 'id-elearning-key'}
             fail_msg: "{{ vault_ids | to_json }}"
 
         - name: Read the generated secrets
@@ -201,8 +205,19 @@
           ansible.builtin.assert:
             that: >-
               vault_values == {'restic_password': '', 'admin_password': 'admin-in-vault',
-                               'resend_api_key': 're-in-vault', 'cockpit_token': ''}
+                               'resend_api_key': 're-in-vault', 'cockpit_token': '',
+                               'backup_s3_key': '{"access_key": "SCWBACKUP", "secret_key": "bk-secret"}',
+                               'elearning_s3_key': ''}
             fail_msg: "{{ vault_values | to_json }}"
+
+        # MAIR-619: the per-bucket key Infra issued fills the backup variables;
+        # a bucket without key yet leaves its variables to the other sources.
+        - name: The backup bucket key of the vault fills AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY
+          ansible.builtin.assert:
+            that: >-
+              (vault_values | vault_bucket_keys) == {'backup_access_key_id': 'SCWBACKUP',
+                                                     'backup_secret_access_key': 'bk-secret'}
+            fail_msg: "{{ (vault_values | vault_bucket_keys) | to_json }}"
 
         - name: Plan a new RESTIC_PASSWORD with a legacy copy to archive
           ansible.builtin.set_fact:
@@ -379,7 +394,7 @@
               ansible.builtin.assert:
                 that:
                   - ansible_failed_result.msg is search('terraform apply')
-                  - ansible_failed_result.msg is search('admin-password, cockpit-token, resend-api-key, sealing-keys')
+                  - ansible_failed_result.msg is search('admin-password, backup-s3-key, cockpit-token, elearning-s3-key, resend-api-key, sealing-keys')
                 fail_msg: "{{ ansible_failed_result.msg }}"
 
         - name: A wrong API key stops the play

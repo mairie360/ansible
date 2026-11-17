@@ -17,6 +17,8 @@
 #   3. for resend_api_key and cockpit_token, the vault (MAIR-803,
 #      vault_external_keys): a value passed in 1. or 2. is stored there, so it
 #      is typed once and CI runs need nothing;
+#      for the S3 keys (s3_*, backup_*), the vault too (MAIR-619): the
+#      per-bucket keys mairie360/Infra issued there; never written by this role;
 #   4. the value already sealed on the instance (kept by seal-secrets.sh);
 #   5. an interactive prompt (secrets_prompt, inventory/group_vars/all.yml).
 #
@@ -73,8 +75,15 @@ vault_entries:
   # nothing typed), stored when passed. Their keys are vault_external_keys.
   resend_api_key: resend-api-key
   cockpit_token: cockpit-token
+  # MAIR-619: the S3 key of each bucket, limited to that bucket, JSON
+  # {"access_key", "secret_key"}. Written by mairie360/Infra
+  # (scripts/issue-bucket-keys.sh), only READ here (filter vault_bucket_keys):
+  # backup_s3_key fills AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY of the backup
+  # CronJob, elearning_s3_key S3_ACCESS_KEY / S3_SECRET_KEY of elearning-api.
+  backup_s3_key: backup-s3-key
+  elearning_s3_key: elearning-s3-key
 # Values read from the vault by tasks/vault_read.yml (sealing keys apart).
-vault_value_keys: [restic_password, admin_password, resend_api_key, cockpit_token]
+vault_value_keys: [restic_password, admin_password, resend_api_key, cockpit_token, backup_s3_key, elearning_s3_key]
 # External secrets (instance_secret_env keys) the vault keeps (MAIR-803).
 vault_external_keys: [resend_api_key, cockpit_token]
 # Versions Secret Manager keeps per secret, disabled ones included (Scaleway

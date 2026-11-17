@@ -168,7 +168,8 @@
   no_log: true
 
 # Order per secret (filter resolve_external_secrets, unit-tested): instance_secrets,
-# the controller's environment, the vault (vault_external_keys), the admin
+# the controller's environment, the vault (vault_external_keys, and the
+# per-bucket S3 keys of MAIR-619, filter vault_bucket_keys), the admin
 # e-mail sealed on the instance; '' otherwise (seal-secrets.sh keeps what the
 # instance has, or the prompts below ask).
 - name: Resolve the external secrets from variables, the vault and the instance
@@ -180,8 +181,8 @@
       {{ instance_secret_env | resolve_external_secrets(
            instance_secrets[inventory_hostname] | default({}),
            dict(instance_secret_env.keys() | zip(query('ansible.builtin.env', *instance_secret_env.values()))),
-           vault_values,
-           vault_external_keys,
+           vault_values | combine(vault_values | vault_bucket_keys),
+           vault_external_keys + (vault_values | vault_bucket_keys | list),
            admin_email_on_cluster.stdout | default('') | trim) }}
   no_log: true
 

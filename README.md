@@ -473,7 +473,10 @@ one that reaches the instance API server, through the tunnel. For each instance:
   `AWS_SECRET_ACCESS_KEY`, `COCKPIT_TOKEN`), then, for the Resend key and the
   Cockpit token, the vault (secrets `resend-api-key` and `cockpit-token`,
   MAIR-803: a value passed or typed once is stored there, so a later run, the
-  CI included, needs nothing typed), otherwise the value already on the
+  CI included, needs nothing typed), and for the S3 keys the per-bucket keys
+  of the vault (secrets `backup-s3-key` and `elearning-s3-key`, MAIR-619: each
+  key only reaches its own bucket; issued by `scripts/issue-bucket-keys.sh` of
+  `mairie360/Infra`, never written by this role), otherwise the value already on the
   instance is kept, else **a prompt** (empty to skip). The Resend key is **mandatory at the
   first sealing** of an instance (no `<env>-keycloak-secret` on it yet, MAIR-599):
   Keycloak imports its SMTP settings once, an empty key would leave its e-mails
