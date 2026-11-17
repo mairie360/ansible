@@ -1,0 +1,36 @@
+---
+# One run of the sealing key upload of tests/vault_test.yml: lists the keys
+# already stored, like the role does, plans the missing ones, writes them.
+- name: "List the sealing keys already in the vault, run {{ run }}"
+  ansible.builtin.uri:
+    url: "{{ vault_api_url }}/secrets/{{ vault_ids[vault_entries.sealing_keys] }}/versions?page_size=100"
+    headers:
+      X-Auth-Token: "{{ vault_auth.secret_key }}"
+    return_content: true
+  register: vault_sealing_versions
+  no_log: true
+
+- name: "Plan the versions of the sealing keys, run {{ run }}"
+  ansible.builtin.set_fact:
+    vault_writes: >-
+      {{ cluster_keys | vault_sealing_key_writes(
+           [],
+           vault_sealing_versions.json.versions | map(attribute='description') | list,
+           vault_entries.sealing_keys) }}
+  vars:
+    cluster_keys:
+      - metadata: {name: sealed-secrets-key2, namespace: kube-system, labels: {sealedsecrets.bitnami.com/sealed-secrets-key: active}}
+        type: kubernetes.io/tls
+        data: {tls.crt: Y3J0Mg==, tls.key: a2V5Mg==}
+      - metadata: {name: sealed-secrets-key1, namespace: kube-system, labels: {sealedsecrets.bitnami.com/sealed-secrets-key: active}}
+        type: kubernetes.io/tls
+        data: {tls.crt: Y3J0MQ==, tls.key: a2V5MQ==}
+
+- name: "The second run plans nothing, run {{ run }}"
+  ansible.builtin.assert:
+    that: run == 'first' or vault_writes == []
+
+- name: "Write the sealing keys, run {{ run }}"
+  ansible.builtin.include_role:
+    name: k8s_instance_secrets
+    tasks_from: vault_write.yml

@@ -1,25 +1,27 @@
 ---
 # =============================================================================
-# Generated secrets backed up on the operator's machine (MAIR-599)
+# Generated secrets stored in the vault (MAIR-599, MAIR-617)
 #
 # Resolves RESTIC_PASSWORD and the admin account's first ADMIN_PASSWORD from
 # facts only, so that tests/seal_passwords_test.yml runs it on localhost
 # without any cluster. Inputs:
 #   generated_on_cluster  {restic_password, admin_password}: values sealed on
 #                         the instance, '' when absent;
-#   generated_backups     {restic_password, admin_password}: contents of the
-#                         operator's backup files, '' when absent.
+#   generated_backups     {restic_password, admin_password}: what the vault
+#                         holds (else a local copy of MAIR-599 being
+#                         migrated), '' when absent.
 # Sets:
 #   generated_sources        where each value comes from (no secret, printed);
 #   generated_seal           the values passed to seal-secrets.sh;
-#   generated_backup_writes  the plaintexts to write into the backup files.
+#   generated_backup_writes  the plaintexts that must be the latest version in
+#                            the vault.
 #
-# Per secret, the instance wins over the backup file, and the file over a new
+# Per secret, the instance wins over the vault, and the vault over a new
 # value. A value already sealed on the instance is NEVER replaced: a new
-# RESTIC_PASSWORD makes every existing backup unreadable. The backup file
-# also covers a re-run before the first secrets.yaml is pushed and synced
-# (the instance has nothing yet): the value sealed again is the one already
-# backed up, not a new one.
+# RESTIC_PASSWORD makes every existing backup unreadable. The vault also
+# covers a re-run before the first secrets.yaml is pushed and synced (the
+# instance has nothing yet): the value sealed again is the one already
+# stored, not a new one.
 #
 # ADMIN_PASSWORD: the instance holds its argon2id hash (MAIR-414). That hash
 # is passed back as-is (seal-secrets.sh seals a `$argon2id$` value
@@ -28,7 +30,7 @@
 # passed in and backed up; seal-secrets.sh seals its hash. Otherwise the
 # plaintext (backup file or new) is passed in: seal-secrets.sh seals its
 # hash and, ADMIN_PASSWORD being set, writes no file on the Argo CD machine.
-# The plaintext only ever lives in the operator's backup file.
+# The plaintext only ever lives in the vault.
 #
 # New values are hex, like the ones seal-secrets.sh generates (URL-safe).
 # =============================================================================
@@ -57,11 +59,15 @@
            else lookup('ansible.builtin.password', '/dev/null', chars=['digits', 'abcdef'], length=64)) }}
   no_log: true
 
-# Not the admin hash: the backup file keeps the plaintext it already holds.
-- name: Resolve the plaintexts to back up on the operator's machine
+# Never the admin hash. When the instance holds the hash, the plaintext known
+# for it (vault, else the plain-named copy of MAIR-599) stays the current
+# version: an older suffixed copy is only archived (CodeRabbit on ansible#61).
+- name: Resolve the plaintexts to store in the vault
   ansible.builtin.set_fact:
     generated_backup_writes: >-
       {{ {'restic_password': generated_seal.restic_password}
          | combine({'admin_password': generated_seal.admin_password}
-                   if generated_sources.admin_password != 'cluster' else {}) }}
+                   if generated_sources.admin_password != 'cluster'
+                   else ({'admin_password': generated_backups.admin_password}
+                         if generated_backups.admin_password | length > 0 else {})) }}
   no_log: true
