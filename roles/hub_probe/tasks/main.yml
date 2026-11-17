@@ -68,6 +68,20 @@
   changed_when: "'configured' in hub_probe_secret.stdout or 'created' in hub_probe_secret.stdout"
   no_log: true
 
+# The Secret's resourceVersion changes only when its content does. It goes in a
+# pod annotation (never the token itself), so a rotated token restarts the pod,
+# and a retry after a later failure still finds the new revision on the cluster.
+- name: Read the revision of the probe's token Secret
+  ansible.builtin.command: >-
+    kubectl -n {{ hub_probe_namespace }} get secret hub-probe-token
+    -o jsonpath={.metadata.resourceVersion}
+  register: hub_probe_token_revision
+  changed_when: false
+
+- name: Keep the revision for the manifest
+  ansible.builtin.set_fact:
+    hub_probe_secret_revision: "{{ hub_probe_token_revision.stdout }}"
+
 - name: Create the manifest directory
   ansible.builtin.file:
     path: "{{ hub_probe_manifest | dirname }}"

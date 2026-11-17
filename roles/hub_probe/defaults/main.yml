@@ -31,3 +31,7 @@ hub_probe_manifest: /opt/hub-probe/probe.yaml
 # Push-only token read from the vault (written by mairie360/Infra
 # scripts/issue-cockpit-tokens.sh <org> hub), never typed nor written here.
 hub_probe_vault_path: "/{{ org_id }}/hub"
+
+# resourceVersion of the token Secret, read by the role before the manifest is
+# rendered: it restarts the pod when the token changes.
+hub_probe_secret_revision: "0"
