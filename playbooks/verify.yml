@@ -67,6 +67,37 @@
           `sudo KUBECONFIG=/root/.kube/argocd-cli.yaml argocd app terminate-op <app> --core`,
           then let auto-sync pick up the latest commit.
 
+    # MAIR-801: staging's Application had no automated sync (last auto sync
+    # 2026-10-20) although deploiment_auto_sync_envs lists it since MAIR-444:
+    # the ApplicationSet on the machine was older than the template, because
+    # role k8s_argocd had not been re-applied. Every promotion then waited for
+    # a hand sync. Compare each instance Application with the variable.
+    - name: Read the sync policy of the instance Applications
+      ansible.builtin.shell: |
+        set -o pipefail
+        kubectl -n argocd get applications.argoproj.io -o json | jq -r '
+          .items[]
+          | select(any(.metadata.ownerReferences[]?; .kind == "ApplicationSet" and .name == "instances"))
+          | "\(.metadata.name) \(if .spec.syncPolicy.automated then "auto" else "manual" end)"'
+      args:
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      register: sync_policies
+      changed_when: false
+
+    - name: Every instance Application syncs as deploiment_auto_sync_envs says
+      ansible.builtin.assert:
+        that: item.split(' ')[1] == ('auto' if item.split(' ')[0] in deploiment_auto_sync_envs else 'manual')
+        fail_msg: >-
+          Application {{ item.split(' ')[0] }} has {{ item.split(' ')[1] }} sync, but
+          deploiment_auto_sync_envs ({{ deploiment_auto_sync_envs | join(', ') }}) asks for
+          {{ 'auto' if item.split(' ')[0] in deploiment_auto_sync_envs else 'manual' }}:
+          the ApplicationSet on this machine is out of date. Re-apply it with
+          `ansible-playbook playbooks/site.yml --limit {{ inventory_hostname }} --tags phase2`
+          (README, "Sync policy of the instances").
+      loop: "{{ sync_policies.stdout_lines }}"
+
     - name: The instances of the group are registered, labelled and annotated
       ansible.builtin.shell: |
         set -o pipefail

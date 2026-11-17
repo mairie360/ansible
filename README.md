@@ -285,6 +285,33 @@ ansible-playbook playbooks/verify.yml
 Acceptance test: push a commit to `Deploiment` `main` while an instance is
 syncing, and check that it converges on the new commit on its own.
 
+### Sync policy of the instances (MAIR-801)
+
+`deploiment_auto_sync_envs` (`inventory/group_vars/all.yml`, `dev` and
+`staging`) lists the environments whose Application syncs by itself (prune +
+self-heal); the others, prod included, are synced by hand. The list is
+rendered into the ApplicationSet's `templatePatch`, so it only reaches the
+cluster when phase 2 re-applies the ApplicationSet.
+
+On 2026-11-06 the staging Application had no automated sync (last auto sync
+2026-10-20) and showed OutOfSync / Degraded: `staging` had been added to the
+list by MAIR-444 (2026-11-02), but the ApplicationSet on the machine was the
+one applied before. Every Promote to staging then needed a hand sync.
+`playbooks/verify.yml` now compares every instance Application with the list
+and fails with the command to run; `tests/image_updater_test.yml` checks that
+the rendered `templatePatch` automates exactly the list. After changing it:
+
+```bash
+ansible-playbook playbooks/site.yml --limit mairie360_argocd --tags phase2
+ansible-playbook playbooks/verify.yml --limit mairie360_argocd
+# On the Argo CD machine: which Applications sync by themselves
+sudo kubectl -n argocd get applications -o custom-columns=NAME:.metadata.name,AUTO:.spec.syncPolicy.automated,SYNC:.status.sync.status,HEALTH:.status.health.status
+```
+
+An Application that stays Degraded once synced is a workload problem, not
+this one: look at its resources (`argocd app get <env> --core` with the
+kubeconfig above, then the pods and events of `mairie360-<env>`).
+
 ## Image tags (MAIR-186, MAIR-444)
 
 What runs on an instance is always what `Deploiment` says: argocd-image-updater
