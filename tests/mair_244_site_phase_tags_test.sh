@@ -26,8 +26,8 @@ tasks_per_play() {
 expect() {
   local out line play count phase want
   out=$(tasks_per_play "$1")
-  if [ "$(printf '%s\n' "$out" | grep -c .)" -ne 7 ]; then
-    echo "  FAIL  --tags $1: expected 7 plays, got:"; printf '%s\n' "$out"
+  if [ "$(printf '%s\n' "$out" | grep -c .)" -ne 8 ]; then
+    echo "  FAIL  --tags $1: expected 8 plays, got:"; printf '%s\n' "$out"
     echo "  ansible-playbook stderr:"; cat "$ERR"; FAILED=1; return
   fi
   while IFS= read -r line; do
@@ -53,5 +53,8 @@ expect github_runner "5"
 # Phase 6, the operations runner of MAIR-803 (also tag ops_runner).
 expect phase6 "6"
 expect ops_runner "6"
+# Phase 7, the external probe of MAIR-621 (also tag hub_probe).
+expect phase7 "7"
+expect hub_probe "7"
 
 [ "$FAILED" -eq 0 ] && echo "OK" || { echo "FAILED"; exit 1; }

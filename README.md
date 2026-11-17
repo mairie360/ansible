@@ -21,7 +21,7 @@ Each Argo CD only drives the instances of its group, and its WireGuard tunnel
 only spans that group. A compromised client has no network route to another
 one: the isolation comes from the topology.
 
-## The six phases
+## The seven phases
 
 | Phase | Role | Target | What it does |
 |---|---|---|---|
@@ -32,6 +32,7 @@ one: the isolation comes from the topology.
 | 4 | `k8s_instance_secrets` | `*_instances` | Seals the instance secrets with `seal-secrets.sh`, asks for the missing external ones, copies `secrets.yaml` back to the local `Deploiment` checkout |
 | 5 | `github_runner` | `*_argocd` (installs with `github_runner_enabled`, removes otherwise) | Ephemeral GitHub Actions runner of `Deploiment` and a least-privilege kubeconfig on staging, so the Promote workflow runs `verify.sh` before prod (MAIR-346) |
 | 6 | `ops_runner` | `*_argocd` (installs with `ops_runner_enabled`, removes otherwise) | Ephemeral runner of this repository's Operations workflow: `secrets.yml` and `verify.yml` from the CI after approval (MAIR-803), see [Running from the CI](#running-from-the-ci-mair-803) |
+| 7 | `hub_probe` | `*_argocd` (installs when `hub_probe_metrics_endpoint` is set, removes otherwise) | External probe: an OpenTelemetry Collector (`httpcheck`) checks `https://login.<instance_domain>/` of every instance each minute and pushes to the group's Cockpit source `<org>-probes`; its token is read from the vault (`/<org>/hub/cockpit-token`). Alert rules and e-mails: `mairie360/Infra` (MAIR-621) |
 
 The `k8s_argocd` role installs **neither** cert-manager, **nor** the ingress
 controller, **nor** a ClusterIssuer: Argo CD deploys them on the instances,

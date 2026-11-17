@@ -1,0 +1,84 @@
+---
+# Test of role hub_probe (MAIR-621), on localhost, no machine touched:
+#
+#   ansible-playbook tests/hub_probe_test.yml
+#
+# Renders the probe manifest and checks the collector probes every instance
+# URL, pushes to the endpoint given and takes its token from the Secret.
+- name: External probe
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    org_id: mairie360
+    # What filter hub_probe_urls (tests/test_hub_probe.py) gives for dev and prod.
+  tasks:
+    - name: Load the role defaults
+      ansible.builtin.include_vars:
+        file: ../roles/hub_probe/defaults/main.yml
+
+    # Set after the defaults: include_vars outranks play vars and would reset these.
+    - name: Set the fixtures
+      ansible.builtin.set_fact:
+        # What filter hub_probe_urls (tests/test_hub_probe.py) gives for dev and prod.
+        hub_probe_urls: ['https://login.dev.mairie360-eip.fr/', 'https://login.prod.mairie360-eip.fr/']
+        hub_probe_metrics_endpoint: https://11111111-1111-1111-1111-111111111111.metrics.cockpit.fr-par.scw.cloud/otlp/v1/metrics
+
+    - name: Render the manifest
+      ansible.builtin.set_fact:
+        docs: "{{ lookup('ansible.builtin.template', '../roles/hub_probe/templates/probe.yaml.j2') | from_yaml_all | list }}"
+
+    - name: Parse the collector configuration
+      ansible.builtin.set_fact:
+        config: "{{ (docs | selectattr('kind', 'equalto', 'ConfigMap') | first).data['config.yaml'] | from_yaml }}"
+        deployment: "{{ docs | selectattr('kind', 'equalto', 'Deployment') | first }}"
+
+    - name: The collector probes every instance and pushes to the probes source
+      ansible.builtin.assert:
+        that:
+          - config.receivers.httpcheck.targets | map(attribute='endpoint') | list
+            == ['https://login.dev.mairie360-eip.fr/', 'https://login.prod.mairie360-eip.fr/']
+          - config.exporters['otlphttp/cockpit'].metrics_endpoint == hub_probe_metrics_endpoint
+          - config.exporters['otlphttp/cockpit'].headers['X-TOKEN'] == '${env:COCKPIT_TOKEN}'
+          - config.service.pipelines.metrics.receivers == ['httpcheck']
+        fail_msg: "{{ config | to_nice_yaml }}"
+
+    - name: The endpoint under test is the nonempty fixture
+      ansible.builtin.assert:
+        that:
+          - hub_probe_metrics_endpoint | length > 0
+          - config.exporters['otlphttp/cockpit'].metrics_endpoint | length > 0
+
+    - name: The pod restarts on any collector setting and on a new token revision
+      ansible.builtin.set_fact:
+        base_checksum: "{{ deployment.spec.template.metadata.annotations['mairie360.fr/config'] }}"
+        revision: "{{ deployment.spec.template.metadata.annotations['mairie360.fr/token-revision'] }}"
+
+    # include_vars outranks task vars: the other settings go through set_fact.
+    - name: Change the interval, the timeout and the token revision
+      ansible.builtin.set_fact:
+        hub_probe_interval: 17s
+        hub_probe_timeout: 7s
+        hub_probe_secret_revision: "4242"
+
+    - name: Re-render with the other settings
+      ansible.builtin.set_fact:
+        other: "{{ lookup('ansible.builtin.template', '../roles/hub_probe/templates/probe.yaml.j2') | from_yaml_all | list }}"
+
+    - name: The annotations changed
+      ansible.builtin.assert:
+        that:
+          - (other | selectattr('kind', 'equalto', 'Deployment') | first).spec.template.metadata.annotations['mairie360.fr/config'] != base_checksum
+          - (other | selectattr('kind', 'equalto', 'Deployment') | first).spec.template.metadata.annotations['mairie360.fr/token-revision'] == '4242'
+          - revision == '0'
+
+    - name: The token comes from the Secret, the pod runs unprivileged
+      ansible.builtin.assert:
+        that:
+          - container.env[0].valueFrom.secretKeyRef.name == 'hub-probe-token'
+          - container.image == 'otel/opentelemetry-collector-contrib:' ~ hub_probe_image_tag
+          - container.securityContext.allowPrivilegeEscalation == false
+          - deployment.spec.template.spec.securityContext.runAsNonRoot
+        fail_msg: "{{ deployment | to_nice_yaml }}"
+      vars:
+        container: "{{ deployment.spec.template.spec.containers[0] }}"

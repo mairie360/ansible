@@ -260,3 +260,7 @@ jobs:
         run: python -m unittest tests/test_inventory_from_terraform.py -v
       - name: Render the sudoers file and the unit
         run: ansible-playbook tests/ops_runner_test.yml
+      - name: External probe, filter and wiring (MAIR-621)
+        run: python -m unittest tests/test_hub_probe.py -v
+      - name: Render the external probe manifest (MAIR-621)
+        run: ansible-playbook tests/hub_probe_test.yml
