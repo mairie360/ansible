@@ -1,0 +1,121 @@
+# Operations on an instance from the CI instead of an operator's workstation (MAIR-803).
+#
+#   secrets  playbooks/secrets.yml on <org>-<env>, then a pull request on Deploiment with the
+#            new clusters/<org>/instances/<env>/secrets.yaml;
+#   verify   playbooks/verify.yml on the group's Argo CD machine and <org>-<env>.
+#
+# Runs on the group's Argo CD machine (runner of role ops_runner, label
+# mairie360-ops-<org>), from `main` only, and only after a reviewer approved the run in the
+# environment ops-<org>-<env>: the job is root on that machine and its instances. The job
+# never runs this checkout's code: `sudo mairie360-ops` runs `main` from a root-owned clone.
+# site.yml stays on the workstation (README, "Running from the CI").
+name: Operations
+
+on:
+  workflow_dispatch:
+    inputs:
+      org:
+        description: Group (inventory/ci-<org>.yml)
+        type: choice
+        options: [mairie360]
+        required: true
+      action:
+        description: Playbook to run
+        type: choice
+        options: [secrets, verify]
+        required: true
+      env:
+        description: Instance environment
+        type: choice
+        options: [dev, staging, prod]
+        required: true
+
+permissions:
+  contents: read
+
+# One operation per instance at a time; never cancel a sealing half-way.
+concurrency:
+  group: ops-${{ inputs.org }}-${{ inputs.env }}
+  cancel-in-progress: false
+
+jobs:
+  run:
+    name: ${{ inputs.action }} ${{ inputs.org }}-${{ inputs.env }}
+    if: github.ref == 'refs/heads/main'
+    runs-on: ${{ fromJSON(format('["self-hosted","linux","mairie360-ops-{0}"]', inputs.org)) }}
+    # Required reviewers and the `main` branch policy are set on each environment.
+    environment: ops-${{ inputs.org }}-${{ inputs.env }}
+    timeout-minutes: 60
+    steps:
+      - name: Run the operation on the Argo CD machine
+        env:
+          ACTION: ${{ inputs.action }}
+          ORG: ${{ inputs.org }}
+          ENV_NAME: ${{ inputs.env }}
+          # Key of the ci-ansible application (mairie360/Infra, iam/), kept by sudo for the
+          # wrapper. verify.yml does not use it.
+          SCW_ACCESS_KEY: ${{ secrets.SCW_ACCESS_KEY }}
+          SCW_SECRET_KEY: ${{ secrets.SCW_SECRET_KEY }}
+          SCW_DEFAULT_PROJECT_ID: ${{ vars.SCW_DEFAULT_PROJECT_ID }}
+          SCW_DEFAULT_ORGANIZATION_ID: ${{ vars.SCW_DEFAULT_ORGANIZATION_ID }}
+        run: sudo -n /usr/local/sbin/mairie360-ops "$ACTION" "$ORG" "$ENV_NAME"
+
+      # Sealed with the instance's public key: safe to hand over (it is committed in Deploiment).
+      - name: Keep the sealed secrets.yaml
+        if: inputs.action == 'secrets'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: secrets-${{ inputs.org }}-${{ inputs.env }}
+          path: /var/lib/gh-ops/out/${{ inputs.org }}-${{ inputs.env }}/secrets.yaml
+          if-no-files-found: error
+          retention-days: 1
+
+  pull-request:
+    name: Deploiment pull request
+    needs: run
+    if: inputs.action == 'secrets'
+    # GitHub-hosted: the release app's key never reaches the Argo CD machine.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # Actions that receive the release app key or its token are pinned to a commit.
+      - name: Token of the release app on Deploiment
+        id: app_token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          app-id: ${{ secrets.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PK }}
+          owner: ${{ github.repository_owner }}
+          repositories: Deploiment
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Check out this repository (scripts/ops-secrets-pr.sh)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: ansible
+          persist-credentials: false
+
+      - name: Check out Deploiment (main)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ github.repository_owner }}/Deploiment
+          ref: main
+          path: deploiment
+          token: ${{ steps.app_token.outputs.token }}
+          persist-credentials: false
+
+      - name: Fetch the sealed secrets.yaml
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: secrets-${{ inputs.org }}-${{ inputs.env }}
+          path: sealed
+
+      - name: Open the pull request
+        env:
+          GH_TOKEN: ${{ steps.app_token.outputs.token }}
+          ORG: ${{ inputs.org }}
+          ENV_NAME: ${{ inputs.env }}
+          ACTOR: ${{ github.actor }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: bash ansible/scripts/ops-secrets-pr.sh deploiment sealed/secrets.yaml

@@ -213,6 +213,36 @@ def vault_sealing_key_writes(cluster_keys, legacy_keys, stored, entry):
     return writes
 
 
+def resolve_external_secrets(env_names, explicit, environment, vault_values, vault_keys, admin_email_on_cluster):
+    """Value of each external secret of instance_secret_env (MAIR-803), '' when unknown.
+
+    First non-empty of: `explicit` (instance_secrets[<host>]), `environment`
+    ({key: value of its environment variable}), the vault for the keys of
+    `vault_keys`, and for admin_email the one sealed on the instance. What
+    the instance already holds for the other keys is kept by seal-secrets.sh
+    itself, so it is not a source here.
+    """
+    resolved = {}
+    for key in env_names:
+        sources = [(explicit or {}).get(key), (environment or {}).get(key)]
+        if key in (vault_keys or []):
+            sources.append((vault_values or {}).get(key))
+        if key == "admin_email":
+            sources.append(admin_email_on_cluster)
+        resolved[key] = next((str(v) for v in sources if v), "")
+    return resolved
+
+
+def vault_external_finals(resolved, vault_keys):
+    """{key: value} of the external secrets the vault must hold after this run.
+
+    Fed to vault_generated_writes as finals: a value equal to the vault's
+    current version (read from it, or passed again) adds nothing; a new one
+    becomes the current version. Empty values are never stored.
+    """
+    return {key: resolved[key] for key in vault_keys or [] if resolved.get(key)}
+
+
 def vault_quota_overflows(listed, writes, limit):
     """Secrets that `writes` would push past `limit` versions, as messages.
 
@@ -258,6 +288,8 @@ class FilterModule:
             "vault_generated_writes": vault_generated_writes,
             "vault_current_revisions": vault_current_revisions,
             "vault_sealing_key_writes": vault_sealing_key_writes,
+            "resolve_external_secrets": resolve_external_secrets,
+            "vault_external_finals": vault_external_finals,
             "vault_quota_overflows": vault_quota_overflows,
             "vault_stale_archives": vault_stale_archives,
             "vault_truncated_listings": vault_truncated_listings,

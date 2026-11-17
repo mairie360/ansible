@@ -11,13 +11,17 @@
 #      config to the runner through /run/gh-runner/jitconfig.
 # The App key never leaves /etc/gh-runner (root, 0700), which the runner
 # user cannot read. Never add `set -x` here: it would print the tokens.
+# Also used by role ops_runner (MAIR-803), with its own directories:
+# RUNNER_CONF_DIR, RUNNER_STATE_DIR and RUNNER_RUN_DIR (defaults below).
 set -euo pipefail
 umask 077
 
 : "${RUNNER_REPO:?}" "${RUNNER_LABELS:?}" "${RUNNER_NAME_PREFIX:?}" "${RUNNER_DIST:?}" "${RUNNER_USER:?}"
-KEY=/etc/gh-runner/app.pem
-APP_ID=$(cat /etc/gh-runner/app-id)
-STATE=/var/lib/gh-runner
+CONF=${RUNNER_CONF_DIR:-/etc/gh-runner}
+STATE=${RUNNER_STATE_DIR:-/var/lib/gh-runner}
+RUN=${RUNNER_RUN_DIR:-/run/gh-runner}
+KEY=$CONF/app.pem
+APP_ID=$(cat "$CONF/app-id")
 API=https://api.github.com
 
 # --- 1. Pristine runner and HOME ---------------------------------------------
@@ -57,6 +61,6 @@ jit=$(api -X POST -H "Authorization: Bearer $token" \
 api -X DELETE -H "Authorization: Bearer $token" "$API/installation/token" >/dev/null || true
 
 [ -n "$jit" ] && [ "$jit" != null ] || { echo "no JIT config returned for $name" >&2; exit 1; }
-install -o "$RUNNER_USER" -g "$RUNNER_USER" -m 0600 /dev/null /run/gh-runner/jitconfig
-printf '%s' "$jit" > /run/gh-runner/jitconfig
+install -o "$RUNNER_USER" -g "$RUNNER_USER" -m 0600 /dev/null "$RUN/jitconfig"
+printf '%s' "$jit" > "$RUN/jitconfig"
 echo "registered ephemeral runner $name on $RUNNER_REPO (labels: $RUNNER_LABELS)"

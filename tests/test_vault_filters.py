@@ -248,6 +248,57 @@ class SealingKeyWrites(unittest.TestCase):
         self.assertEqual(manifest["type"], "kubernetes.io/tls")
 
 
+class ExternalSecrets(unittest.TestCase):
+    """MAIR-803: a CI run types nothing; values passed once are kept in the vault."""
+
+    NAMES = {"resend_api_key": "RESEND_API_KEY", "s3_access_key": "S3_ACCESS_KEY",
+             "cockpit_token": "COCKPIT_TOKEN", "admin_email": "ADMIN_EMAIL"}
+    VAULT_KEYS = ["resend_api_key", "cockpit_token"]
+
+    def resolve(self, explicit=None, environment=None, vault_values=None, admin=""):
+        return vault.resolve_external_secrets(self.NAMES, explicit or {}, environment or {},
+                                              vault_values or {}, self.VAULT_KEYS, admin)
+
+    def test_explicit_then_environment_then_vault(self):
+        vault_values = {"resend_api_key": "re_vault", "cockpit_token": "ck_vault"}
+        got = self.resolve(explicit={"resend_api_key": "re_explicit"},
+                           environment={"resend_api_key": "re_env", "cockpit_token": "ck_env"},
+                           vault_values=vault_values)
+        self.assertEqual(got["resend_api_key"], "re_explicit")
+        self.assertEqual(got["cockpit_token"], "ck_env")
+        self.assertEqual(self.resolve(environment={"resend_api_key": ""}, vault_values=vault_values)["resend_api_key"],
+                         "re_vault", "an empty variable does not hide the vault")
+
+    def test_only_vault_keys_come_from_the_vault(self):
+        got = self.resolve(vault_values={"s3_access_key": "leaked", "resend_api_key": "re"})
+        self.assertEqual(got["s3_access_key"], "")
+        self.assertEqual(got["resend_api_key"], "re")
+
+    def test_admin_email_falls_back_on_the_sealed_one_only_last(self):
+        self.assertEqual(self.resolve(admin="sealed@example.org")["admin_email"], "sealed@example.org")
+        self.assertEqual(self.resolve(environment={"admin_email": "new@example.org"}, admin="sealed@example.org")["admin_email"],
+                         "new@example.org")
+        self.assertEqual(self.resolve()["admin_email"], "", "nothing anywhere stays empty: the play then fails")
+
+    def test_every_name_is_resolved(self):
+        self.assertEqual(set(self.resolve()), set(self.NAMES))
+
+    def test_finals_hold_only_non_empty_vault_keys(self):
+        resolved = {"resend_api_key": "re", "cockpit_token": "", "s3_access_key": "s3"}
+        self.assertEqual(vault.vault_external_finals(resolved, self.VAULT_KEYS), {"resend_api_key": "re"})
+
+    def test_a_value_read_from_the_vault_is_not_written_again(self):
+        vault_values = {"resend_api_key": "re", "cockpit_token": "", "restic_password": "", "admin_password": ""}
+        finals = vault.vault_external_finals(self.resolve(vault_values=vault_values), self.VAULT_KEYS)
+        self.assertEqual(vault.vault_generated_writes(vault_values, finals, [], ENTRIES | {"resend_api_key": "resend-api-key", "cockpit_token": "cockpit-token"}, "l"), [])
+
+    def test_a_new_value_becomes_the_current_version(self):
+        vault_values = {"resend_api_key": "re_old", "cockpit_token": ""}
+        finals = vault.vault_external_finals(self.resolve(environment={"resend_api_key": "re_new"}, vault_values=vault_values), self.VAULT_KEYS)
+        writes = vault.vault_generated_writes(vault_values, finals, [], {"resend_api_key": "resend-api-key", "cockpit_token": "cockpit-token"}, "l")
+        self.assertEqual([(w["entry"], w["content"], w["archive"]) for w in writes], [("resend-api-key", "re_new", False)])
+
+
 class QuotaOverflows(unittest.TestCase):
     """Scaleway keeps 20 versions per secret: never start a write it would refuse."""
 
