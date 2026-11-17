@@ -53,6 +53,17 @@ jobs:
       - name: No public IP in tracked files
         run: python3 tests/check_no_public_ip.py
 
+  restore-inventory:
+    # MAIR-800: scripts/restore-inventory.py rebuilds the gitignored
+    # inventory/hosts.yml from the example and Scaleway (fake scw here).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install ansible-core
+        run: pipx install ansible-core==2.20.7
+      - name: Rebuild an inventory from a fake Scaleway
+        run: bash tests/restore_inventory_test.sh
+
   image-updater:
     # MAIR-186 / MAIR-444: prod gets no ImageUpdater, dev and staging write their tags to git.
     runs-on: ubuntu-latest
