@@ -44,6 +44,7 @@ Each play carries its phase tag (MAIR-244): `--tags phase1,phase1b,phase2` runs 
 | `phase3` | `k8s_instance_link` | `*_instances` | `argocd cluster add` over the WireGuard IP, cluster labels (`mairie360.fr/role=instance`, `org`, `env`, `ingress`, tag `labels`) and the `mairie360.fr/revision` annotation, instance kubeconfig on the Argo CD machine |
 | `phase4` (`playbooks/secrets.yml`) | `k8s_instance_secrets` | `*_instances` | seals the instance secrets with `Deploiment/scripts/seal-secrets.sh` on the Argo CD machine, copies `secrets.yaml` back, backs up the generated values and the sealing key |
 | `phase5` | `github_runner` | `*_argocd` | Promote workflow runner of `Deploiment` (installed with `github_runner_enabled`, removed otherwise; also tag `github_runner`) |
+| `phase8` | `n8n_node` | `mairie360_n8n` | host base of the n8n machine (MAIR-1075): UFW 22/80/443, fail2ban, updates, logs; never deploys the stack of `poc_n8n`. Not matched by `*_argocd:*_instances`: `--limit mairie360_n8n` |
 
 `k8s_argocd` installs neither cert-manager, nor an ingress controller, nor a ClusterIssuer: Argo CD
 deploys them on the instances from `Deploiment` (duplicates would conflict). Always `--limit` whole

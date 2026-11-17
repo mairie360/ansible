@@ -1,0 +1,15 @@
+---
+# Host base of the n8n automation machine (MAIR-1075). The n8n stack itself
+# (Docker Compose, secrets, gate) lives in mairie360/poc_n8n and is deployed
+# from there: this role never writes it.
+
+# Public ports. SSH stays open to the Internet: the machine is not in a
+# WireGuard group.
+n8n_node_public_ports: ["22", "80", "443"]
+
+# Where the stack is cloned on the machine. The role only checks that it is
+# there and that Docker answers; it does not touch it.
+n8n_node_stack_dir: /root/poc_n8n
+
+# Same period as the k8s machines (MAIR-293): technical logs, 1 year at most.
+n8n_node_logs_retention: "1year"

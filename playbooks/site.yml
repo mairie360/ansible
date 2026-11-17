@@ -6,7 +6,7 @@
 #   ansible-playbook playbooks/site.yml --limit mairie360_argocd:mairie360_instances
 #   ansible-playbook playbooks/site.yml --limit client_example_argocd:client_example_instances
 #
-# The six phases: prepare the k8s base, start the group's Argo CD, link the
+# The six phases (plus phase 7, the external probe, and phase 8, the n8n machine): prepare the k8s base, start the group's Argo CD, link the
 # instances to it once both sides are ready, seal each instance's secrets
 # (prompting for the external ones that are missing), then, for groups that
 # promote (github_runner_enabled), install the runner that verifies staging
@@ -98,3 +98,15 @@
   roles:
     - role: hub_probe
       tags: [hub_probe]
+
+# MAIR-1075: the n8n automation machine. It belongs to the platform's Terraform
+# but not to its Kubernetes groups: host base only (firewall, fail2ban, updates,
+# logs), the n8n stack is deployed from mairie360/poc_n8n. Not matched by the
+# `*_argocd:*_instances` patterns above: `--limit mairie360_n8n`.
+- name: "Phase 8 — n8n machine host base"
+  hosts: "mairie360_n8n"
+  become: true
+  tags: [phase8]
+  roles:
+    - role: n8n_node
+      tags: [n8n_node]

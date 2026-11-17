@@ -1,0 +1,122 @@
+---
+# =============================================================================
+# Phase 8 (MAIR-1075): host base of the n8n machine, which is not part of the
+# platform (no k3s, no WireGuard, no Argo CD). Idempotent: `--check --diff`
+# shows what would change on a machine that is already set up.
+# The n8n stack is out of scope here: it holds live secrets and is deployed
+# from mairie360/poc_n8n.
+# =============================================================================
+
+- name: Install the system packages
+  ansible.builtin.apt:
+    name: [curl, ufw, fail2ban, chrony, unattended-upgrades, auditd]
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+  register: n8n_node_packages
+
+# In `--check`, a package that is not installed yet has no service or
+# configuration directory: the tasks that need one are skipped until a real run
+# installs it.
+- name: Enable auditd
+  ansible.builtin.systemd:
+    name: auditd
+    enabled: true
+    state: started
+  when: not (ansible_check_mode and n8n_node_packages is changed)
+
+- name: Create the journald drop-in directory
+  ansible.builtin.file:
+    path: /etc/systemd/journald.conf.d
+    state: directory
+    mode: "0755"
+
+- name: Bound the retention of the machine's logs
+  ansible.builtin.copy:
+    dest: /etc/systemd/journald.conf.d/50-retention.conf
+    mode: "0644"
+    content: |
+      # Managed by Ansible (role n8n_node, MAIR-1075): technical logs retention.
+      [Journal]
+      MaxRetentionSec={{ n8n_node_logs_retention }}
+  notify: Restart journald
+
+# --- Firewall ----------------------------------------------------------------
+# The allow rules come BEFORE the default policy and the activation: a deny
+# policy without the SSH rule would lock the machine out.
+# Docker publishes ports through its own iptables chain, which UFW does not
+# filter: what the stack exposes is decided by the `ports:` of its compose file
+# (80 and 443 only, the gate admin API on 127.0.0.1).
+
+- name: Open the public ports
+  community.general.ufw:
+    rule: allow
+    port: "{{ item }}"
+    proto: tcp
+  loop: "{{ n8n_node_public_ports }}"
+
+- name: Refuse incoming traffic by default
+  community.general.ufw:
+    direction: incoming
+    policy: deny
+
+- name: Allow outgoing traffic by default
+  community.general.ufw:
+    direction: outgoing
+    policy: allow
+
+- name: Enable UFW
+  community.general.ufw:
+    state: enabled
+
+- name: Configure fail2ban for SSH
+  ansible.builtin.copy:
+    dest: /etc/fail2ban/jail.local
+    mode: "0644"
+    content: |
+      [sshd]
+      enabled  = true
+      maxretry = 3
+      bantime  = 3600
+  notify: Restart fail2ban
+  when: not (ansible_check_mode and n8n_node_packages is changed)
+
+- name: Enable fail2ban
+  ansible.builtin.service:
+    name: fail2ban
+    state: started
+    enabled: true
+  when: not (ansible_check_mode and n8n_node_packages is changed)
+
+- name: Install the unattended security upgrades
+  ansible.builtin.copy:
+    dest: /etc/apt/apt.conf.d/20auto-upgrades
+    mode: "0644"
+    content: |
+      APT::Periodic::Update-Package-Lists "1";
+      APT::Periodic::Unattended-Upgrade "1";
+
+# --- The stack is there (read-only) -------------------------------------------
+
+- name: Look for the stack
+  ansible.builtin.stat:
+    path: "{{ n8n_node_stack_dir }}/docker-compose.yml"
+  register: n8n_node_stack
+
+- name: Check that the stack is cloned
+  ansible.builtin.assert:
+    that: n8n_node_stack.stat.exists
+    fail_msg: >-
+      {{ n8n_node_stack_dir }}/docker-compose.yml is missing: clone mairie360/poc_n8n
+      there (its README documents the .env) before running this role.
+    quiet: true
+
+- name: List the running containers
+  ansible.builtin.command: docker ps --format '{{ '{{' }}.Names{{ '}}' }}'
+  register: n8n_node_containers
+  changed_when: false
+  check_mode: false
+
+- name: Report the running containers
+  ansible.builtin.debug:
+    msg: "{{ n8n_node_containers.stdout_lines | length }} container(s) running: {{ n8n_node_containers.stdout_lines | join(', ') }}"
