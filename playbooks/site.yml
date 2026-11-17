@@ -94,6 +94,7 @@
 - name: "Phase 7 — external probe of the instances (MAIR-621, when hub_probe_metrics_endpoint is set)"
   hosts: "*_argocd"
   become: true
+  tags: [phase7]
   roles:
     - role: hub_probe
       tags: [hub_probe]
