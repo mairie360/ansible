@@ -233,6 +233,19 @@ when `gh-runner.service` is not active. On the machine:
 annotation, the runner's RBAC, admission policy and systemd unit on
 localhost and pins the rules above.
 
+Besides the rules listed in `verify.sh`'s header, the runner may `list` the
+`Certificates` (cert-manager.io) and `Ingresses` of the instance namespace
+(MAIR-795), the full objects (`spec` and `status` included), never a Secret:
+`verify.sh` step 12c fails a Certificate whose HTTP-01 solver class is not the
+one its Ingress asks for. Without that grant the step is skipped, so
+**recreate any misaligned Certificate before applying it to an environment**,
+or the next Promote's `verify-staging` fails on it. If a controller recreates
+it (an Ingress with the cert-manager annotation), delete it with
+`kubectl -n mairie360-<env> delete certificate <name>`; a Certificate managed
+by hand does not come back (its Secret stays but renewal stops): make sure its
+manifest is at hand, delete it, then apply the manifest again. Re-run
+`--tags github_runner` to apply the grant to the existing instances.
+
 ## Running from the CI (MAIR-803)
 
 `secrets.yml` and `verify.yml` also run from the **Operations** workflow
