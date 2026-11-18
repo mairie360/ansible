@@ -304,6 +304,9 @@
   register: k3s_installed
   changed_when: false
   failed_when: false
+  # Read-only: a check run must see the real version, or it reports a download
+  # and an install on a machine that already runs the pin.
+  check_mode: false
 
 # "vX.Y.Z+k3sN" -> "X.Y.Z.N": comparable with the `version` test.
 - name: Compare the installed k3s version with the pin

@@ -61,6 +61,12 @@ if len(owners) != 1 or owners[0].get("register") != "k8s_node_packages":
     print("  FAIL  one apt task installing ufw, fail2ban and auditd must register k8s_node_packages")
     failed = 1
 
+# A check run must read the real k3s version: skipped, it looks like k3s is absent.
+reads = [t for t, _ in walk(tasks) if t.get("name") == "Read the installed k3s version"]
+if len(reads) != 1 or reads[0].get("check_mode") is not False:
+    print("  FAIL  'Read the installed k3s version' must set check_mode: false")
+    failed = 1
+
 checked = 0
 for task, conds in walk(tasks):
     if not needs_package(task):
