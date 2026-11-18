@@ -23,7 +23,7 @@ hub_probe_hosts: [login]
 hub_probe_interval: 60s
 hub_probe_timeout: 10s
 
-# Argo CD of the group (MAIR-626), on this same machine: the probe's collector
+# Argo CD of the group, on this same machine: the probe's collector
 # also scrapes the application controller's metrics (`argocd_app_info`: health
 # and sync status of every Application, cluster connection) and pushes them to
 # <org>-probes, where the Argo CD alerts of mairie360/Infra read them. The
