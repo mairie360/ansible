@@ -8,11 +8,19 @@
 
 - name: Installer les dépendances système
   ansible.builtin.apt:
-    # auditd: audit trail of the machine (MAIR-293, checked by playbooks/verify.yml).
-    name: [curl, jq, ufw, fail2ban, chrony, unattended-upgrades, python3-yaml, auditd]
+    name: [curl, jq, chrony, unattended-upgrades, python3-yaml]
     state: present
     update_cache: true
     cache_valid_time: 3600
+
+# The packages of the tasks below. A check run only simulates this install, so
+# the tasks that need these packages are skipped when it reports a change (and
+# only then: a missing curl does not hide a firewall or jail drift).
+# auditd: audit trail of the machine (MAIR-293, checked by playbooks/verify.yml).
+- name: Install the firewall, intrusion-ban and audit packages
+  ansible.builtin.apt:
+    name: [ufw, fail2ban, auditd]
+    state: present
   register: k8s_node_packages
 
 - name: Enable auditd
