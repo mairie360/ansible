@@ -739,12 +739,39 @@ lists them), whole groups, `dev` first:
 
 ```bash
 # e.g. from v1.31: 1.32 -> 1.33 -> 1.34 -> 1.35 (the pin)
-for v in v1.32.13+k3s1 v1.33.13+k3s2 v1.34.11+k3s1; do
+for v in v1.32.13+k3s1 v1.33.13+k3s2 v1.34.13+k3s1; do
   ansible-playbook playbooks/site.yml --limit 'mairie360_argocd:mairie360_instances' -e k3s_version=$v || break
 done
 ansible-playbook playbooks/site.yml --limit 'mairie360_argocd:mairie360_instances'
 ansible-playbook playbooks/verify.yml
 ```
+
+**One machine at a time, with checks.** The loop above upgrades a whole group
+per step. The k3s phase alone does not need the whole group (only the WireGuard
+phase does), so the four `mairie360` machines (dev, staging, Argo CD, prod) went
+from v1.31.14 to v1.35.8 one machine at a time, one minor at a time:
+
+```bash
+ansible-playbook playbooks/site.yml --limit mairie360-dev --tags phase1 -e k3s_version=v1.32.13+k3s1
+```
+
+After each step, before the next one: the node is `Ready`, no pod is outside
+`Running` / `Completed`, every Application of the group's Argo CD is
+`Synced` / `Healthy`, a front answers (`https://login.<instance_domain>/`) and
+the free disk space is still above the limit below. A second run of the same
+command must report `changed=0`. Stop at the first anomaly. Argo CD is unaffected
+while an instance is upgraded; when its own machine restarts, Argo CD is
+unreachable for a minute or two and the deployed applications keep running.
+A dry run (`--check --diff --tags phase1,phase1b`) reports `changed=0` on a
+machine that already runs the pin.
+
+**Disk space.** The root volumes are small (17 GB on the Argo CD machine, 26 GB on
+the others). Each minor adds about 250 MB (a new directory in
+`/var/lib/rancher/k3s/data`) plus new system images, and container images of
+old releases pile up until the kubelet cleans them at 85 % usage. Run
+`crictl rmi --prune` (removes only images no container uses) before every step
+and stop below 3 GB free (1.7 GB on the 17 GB volume): the kubelet evicts pods at
+10 % free space.
 
 **Argo CD.** Phase 2 re-applies `install.yaml` of `argocd_version` with
 server-side apply (required since 3.3) and replaces the `argocd` CLI when its
