@@ -179,6 +179,12 @@ jobs:
         run: pipx install ansible-core==2.20.7
       - name: Each phase tag selects its play only
         run: bash tests/mair_244_site_phase_tags_test.sh
+      - name: Install PyYAML
+        run: |
+          python3 -m venv "$RUNNER_TEMP/py"
+          "$RUNNER_TEMP/py/bin/pip" install pyyaml==6.0.3
+      - name: A check run skips the tasks of a package it only simulates
+        run: '"$RUNNER_TEMP/py/bin/python" tests/mair_1076_check_mode_guard_test.py'
 
   restore-sealing-key:
     # MAIR-244: the sealing key backup goes back on a rebuilt machine.
