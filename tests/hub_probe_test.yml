@@ -40,7 +40,7 @@
             == ['https://login.dev.mairie360-eip.fr/', 'https://login.prod.mairie360-eip.fr/']
           - config.exporters['otlphttp/cockpit'].metrics_endpoint == hub_probe_metrics_endpoint
           - config.exporters['otlphttp/cockpit'].headers['X-TOKEN'] == '${env:COCKPIT_TOKEN}'
-          - config.service.pipelines.metrics.receivers == ['httpcheck']
+          - config.service.pipelines.metrics.receivers == ['httpcheck', 'prometheus/argocd']
         fail_msg: "{{ config | to_nice_yaml }}"
 
     - name: The endpoint under test is the nonempty fixture
@@ -82,3 +82,29 @@
         fail_msg: "{{ deployment | to_nice_yaml }}"
       vars:
         container: "{{ deployment.spec.template.spec.containers[0] }}"
+
+    # MAIR-626: the same collector scrapes the group's Argo CD.
+    - name: The collector scrapes Argo CD's application controller and keeps only the app and cluster series
+      ansible.builtin.assert:
+        that:
+          - argocd.static_configs[0].targets == ['argocd-metrics.argocd.svc:8082']
+          - argocd.metric_relabel_configs[0].action == 'keep'
+          - argocd.metric_relabel_configs[0].regex == 'argocd_app_info|argocd_cluster_info|argocd_cluster_connection_status'
+        fail_msg: "{{ config.receivers | to_nice_yaml }}"
+      vars:
+        argocd: "{{ config.receivers['prometheus/argocd'].config.scrape_configs[0] }}"
+
+    - name: Turn the Argo CD scrape off
+      ansible.builtin.set_fact:
+        hub_probe_argocd_metrics_target: ""
+
+    - name: Re-render without the Argo CD scrape
+      ansible.builtin.set_fact:
+        no_argocd: "{{ (lookup('ansible.builtin.template', '../roles/hub_probe/templates/probe.yaml.j2') | from_yaml_all | list
+                       | selectattr('kind', 'equalto', 'ConfigMap') | first).data['config.yaml'] | from_yaml }}"
+
+    - name: Only the probe is left
+      ansible.builtin.assert:
+        that:
+          - "'prometheus/argocd' not in no_argocd.receivers"
+          - no_argocd.service.pipelines.metrics.receivers == ['httpcheck']
