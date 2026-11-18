@@ -2,7 +2,8 @@
 # =============================================================================
 # External probe of the group (MAIR-621), on the group's Argo CD machine.
 #
-# An OpenTelemetry Collector (contrib build: httpcheck receiver) checks the
+# An OpenTelemetry Collector (contrib build: httpcheck and prometheus
+# receivers) checks the
 # public URLs of every instance of the group each minute, from OUTSIDE the
 # instances, and pushes the results to the group's Cockpit source
 # <org>-probes (mairie360/Infra orgs/<org>/probes.tf). The alert rules
@@ -21,6 +22,18 @@ hub_probe_enabled: "{{ hub_probe_metrics_endpoint | length > 0 }}"
 hub_probe_hosts: [login]
 hub_probe_interval: 60s
 hub_probe_timeout: 10s
+
+# Argo CD of the group, on this same machine: the probe's collector
+# also scrapes the application controller's metrics (`argocd_app_info`: health
+# and sync status of every Application, cluster connection) and pushes them to
+# <org>-probes, where the Argo CD alerts of mairie360/Infra read them. The
+# upstream NetworkPolicy of the controller admits port 8082 from every
+# namespace. Empty = not scraped.
+hub_probe_argocd_metrics_target: argocd-metrics.argocd.svc:8082
+hub_probe_argocd_scrape_interval: 60s
+# Series kept (regex on the name): everything else the controller serves is
+# dropped before Cockpit.
+hub_probe_argocd_keep_metrics: "argocd_app_info|argocd_cluster_info|argocd_cluster_connection_status"
 
 hub_probe_namespace: hub-probe
 hub_probe_image: otel/opentelemetry-collector-contrib
