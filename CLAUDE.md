@@ -85,6 +85,7 @@ ansible-playbook tests/image_updater_test.yml         # ImageUpdater templates (
 ansible-playbook tests/github_runner_test.yml         # promotion runner (MAIR-346)
 python3 tests/check_image_updater_services.py         # image_updater_services vs Deploiment's values
 bash tests/mair_244_site_phase_tags_test.sh           # each phase tag selects its play only
+python3 tests/mair_1076_check_mode_guard_test.py      # k8s_node tasks needing a package are skipped in a check run
 bash tests/mair_244_restore_sealing_key_test.sh       # sealing key restore (PyYAML)
 bash tests/mair_677_secret_scan_test.sh               # Gitleaks rules (docker)
 ```
