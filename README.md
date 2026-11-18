@@ -758,7 +758,7 @@ ansible-playbook playbooks/site.yml --limit mairie360-dev --tags phase1 -e k3s_v
 After each step, before the next one: the node is `Ready`, no pod is outside
 `Running` / `Completed`, every Application of the group's Argo CD is
 `Synced` / `Healthy`, a front answers (`https://login.<instance_domain>/`) and
-the free disk space is still above the limit below. A second run of the same
+the free disk space is above the limit below for the next step. A second run of the same
 command must report `changed=0`. Stop at the first anomaly. Argo CD is unaffected
 while an instance is upgraded; when its own machine restarts, Argo CD is
 unreachable for a minute or two and the deployed applications keep running.
@@ -769,9 +769,11 @@ machine that already runs the pin.
 the others). Each minor adds about 250 MB (a new directory in
 `/var/lib/rancher/k3s/data`) plus new system images, and container images of
 old releases pile up until the kubelet cleans them at 85 % usage. Run
-`crictl rmi --prune` (removes only images no container uses) before every step
-and stop below 3 GB free (1.7 GB on the 17 GB volume): the kubelet evicts pods at
-10 % free space.
+`crictl rmi --prune` (removes only images no container uses) before every step.
+The kubelet evicts pods below 10 % free space (2.6 GB on 26 GB, 1.7 GB on 17 GB),
+and a step can use up to about 1 GB: start a step only with that eviction
+threshold plus 1 GB free (3.6 GB on the 26 GB volumes, 2.7 GB on the 17 GB
+one), and grow the volume when pruning cannot reach it.
 
 **Argo CD.** Phase 2 re-applies `install.yaml` of `argocd_version` with
 server-side apply (required since 3.3) and replaces the `argocd` CLI when its
