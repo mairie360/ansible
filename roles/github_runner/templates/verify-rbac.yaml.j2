@@ -20,7 +20,7 @@
 #     apps         deployments     get list watch      steps 5, 12 (rollout status)
 #     batch        jobs            get list            steps 7, 11
 #     batch        cronjobs        get                 step 11 ({{ github_runner_env }}-backup only)
-#     bitnami.com  sealedsecrets   get                 step 4 (the four instance SealedSecrets only)
+#     bitnami.com  sealedsecrets   get                 step 4 (the three instance SealedSecrets only)
 #     cert-manager.io    certificates  list            step 12c (MAIR-795): HTTP-01 solver class of each Certificate
 #     networking.k8s.io  ingresses     list            step 12c (MAIR-795): the class its Ingress asks for
 #   namespace kube-system
@@ -97,7 +97,6 @@ rules:
       - {{ github_runner_env }}-app-secrets
       - {{ github_runner_env }}-database-secret
       - {{ github_runner_env }}-redis
-      - {{ github_runner_env }}-keycloak-secret
     verbs: [get]
   # Step 12c (MAIR-795) compares each Certificate's HTTP-01 solver class with
   # the one its owning Ingress asks for (`list` returns the full objects, spec and

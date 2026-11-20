@@ -150,7 +150,7 @@ the ServiceAccount, Roles and admission policy on each instance.
 | Ephemeral | One just-in-time (JIT) registration per job: `gh-runner.service` registers, runs one job, exits and systemd restarts it. Before every job the runner directory is re-copied from the pinned release and its `HOME` (`/var/lib/gh-runner/home`) emptied, so nothing a job writes survives |
 | User | `gh-runner`, non-root system user, no login shell, cannot write to `/home/gh-runner`. The systemd unit is sandboxed (`ProtectSystem=strict`, `NoNewPrivileges`, `PrivateTmp`, no access to `/root` nor `/etc/gh-runner`) |
 | Network | Outbound HTTPS to GitHub only: no inbound port, no firewall or WireGuard change. The unit's `IPAddressDeny` blocks the tunnel subnet and this machine's pod and Service networks (Argo CD), except the WireGuard IPs of the verified instances |
-| Instance access | For each env of `github_runner_verify_envs` (default `staging`): ServiceAccount `mairie360-ci/verify-runner` with exactly the rules listed at the top of `Deploiment/scripts/verify.sh` (no Secret read, no exec; mapped to its steps in `roles/github_runner/templates/verify-rbac.yaml.j2`), plus a `ValidatingAdmissionPolicy` that only lets it create, attach to and delete `verify-probe-*` pods of image `curlimages/curl:8.10.1` with no volume, env nor token, labelled at most `app.kubernetes.io/component` = `bff` or `keycloak-test` (`github_runner_probe_components`; never `api`, which would reach Postgres), with no command, lifecycle hook nor liveness/readiness/startup probe (the kubelet runs their commands in the container). With no Secret read, `verify.sh` skips its two plaintext checks there (argon2id `ADMIN_PASSWORD`, URL-safe passwords); run as root they still apply. Kubeconfig: `/home/gh-runner/.kube/instance-<env>.yaml` (root:gh-runner, 0440, one context `<env>`, current); the role fails when another account is a member of the `gh-runner` group, which could read the token. The admin kubeconfigs of `/root/.kube/` are never readable by the runner |
+| Instance access | For each env of `github_runner_verify_envs` (default `staging`): ServiceAccount `mairie360-ci/verify-runner` with exactly the rules listed at the top of `Deploiment/scripts/verify.sh` (no Secret read, no exec; mapped to its steps in `roles/github_runner/templates/verify-rbac.yaml.j2`), plus a `ValidatingAdmissionPolicy` that only lets it create, attach to and delete `verify-probe-*` pods of image `curlimages/curl:8.10.1` with no volume, env nor token, labelled at most `app.kubernetes.io/component` = `bff` (`github_runner_probe_components`; never `api`, which would reach Postgres), with no command, lifecycle hook nor liveness/readiness/startup probe (the kubelet runs their commands in the container). With no Secret read, `verify.sh` skips its two plaintext checks there (argon2id `ADMIN_PASSWORD`, URL-safe passwords); run as root they still apply. Kubeconfig: `/home/gh-runner/.kube/instance-<env>.yaml` (root:gh-runner, 0440, one context `<env>`, current); the role fails when another account is a member of the `gh-runner` group, which could read the token. The admin kubeconfigs of `/root/.kube/` are never readable by the runner |
 | Version | `github_runner_version` + `github_runner_sha256` in `inventory/group_vars/all.yml`. GitHub stops sending jobs to a runner more than 30 days behind: bump it at least monthly |
 
 **Registration credential.** A GitHub App installed on `mairie360/Deploiment`
@@ -515,10 +515,7 @@ one that reaches the instance API server, through the tunnel. For each instance:
   of the vault (secrets `backup-s3-key` and `elearning-s3-key`, MAIR-619: each
   key only reaches its own bucket; issued by `scripts/issue-bucket-keys.sh` of
   `mairie360/Infra`, never written by this role), otherwise the value already on the
-  instance is kept, else **a prompt** (empty to skip). The Resend key is **mandatory at the
-  first sealing** of an instance (no `<env>-keycloak-secret` on it yet, MAIR-599):
-  Keycloak imports its SMTP settings once, an empty key would leave its e-mails
-  broken for good, so the play fails instead. The backup bucket keys are only asked
+  instance is kept, else **a prompt** (empty to skip). The backup bucket keys are only asked
   when `backup.enabled` is true in the instance values, and the Scaleway
   Cockpit token (`COCKPIT_TOKEN`, MAIR-131, read by the OpenTelemetry
   Collector) when `global.observability.enabled` is;
@@ -538,7 +535,7 @@ one that reaches the instance API server, through the tunnel. For each instance:
   reinstall makes every committed `secrets.yaml` of the instance undecryptable.
 
 In CI, pass `-e secrets_prompt=false`: missing secrets are then only reported
-(except the admin e-mail, and the Resend key at the first sealing, which fail).
+(except the admin e-mail, which fails).
 
 ### The vault of the instance secrets
 
@@ -654,7 +651,7 @@ python3 tests/check_no_log.py       # fails on a secret-handling task without no
 python3 tests/check_gdpr_config.py  # fails when Hubble metrics are labelled with IP addresses
 ansible-playbook tests/gdpr_gaps_test.yml   # the GDPR gaps of verify.yml, on localhost
 ansible-playbook tests/image_updater_test.yml   # no ImageUpdater in prod, git write-back for dev/staging
-ansible-playbook tests/seal_passwords_test.yml  # MAIR-599: generated secrets resolution, Resend key at the first sealing
+ansible-playbook tests/seal_passwords_test.yml  # MAIR-599: generated secrets resolution
 python3 -m unittest tests/test_vault_filters.py  # MAIR-617: what is written to the vault
 bash tests/restore_sealing_keys_test.sh          # MAIR-617: sealing keys restore (scw, ssh stubbed)
 ansible-playbook tests/vault_test.yml           # MAIR-617: the vault tasks against a local stand-in of Secret Manager
