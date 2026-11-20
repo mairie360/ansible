@@ -141,7 +141,8 @@ No playbook or role change:
   phase 3; switch a machine with the host var + `--tags labels`, together with
   `global.ingressController` in its Deploiment values (Deploiment ADR 0001).
 - `deploiment_env_revisions` (dev → `main`, staging / prod → their branches) and
-  `deploiment_auto_sync_envs` (`dev`, `staging`) only take effect after re-running `k8s_argocd`.
+  `deploiment_auto_sync_envs` (`dev` only: staging is synced by hand since 2026-11-20) only take
+  effect after re-running `k8s_argocd`.
 - `image_updater_services` (`roles/k8s_argocd/defaults/main.yml`) must follow the instance keys of
   Deploiment's values (`tests/check_image_updater_services.py`); the `project-front` key vs the
   `projects-front` image is intended.

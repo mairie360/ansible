@@ -51,11 +51,11 @@ deploiment_bootstrap_revision: >-
 # promotion to prod a deliberate act (a Promote to staging already is one).
 # Applies to every group: a client group whose only environment is `prod` is
 # synced by hand too. Re-run the k8s_argocd role after changing it.
+# Staging is not in it (decision of 2026-11-20, MAIR-801): its Promotes and
+# argocd-image-updater's commits on the staging branch land when someone syncs
+# them from Argo CD.
 deploiment_auto_sync_envs:
   - dev
-  # MAIR-444: argocd-image-updater commits staging's tags on the staging
-  # branch; staging deploys them by itself, like dev.
-  - staging
 
 # Pinned versions. Bumps go through a PR, never through a playbook run that
 # would pick "the latest".

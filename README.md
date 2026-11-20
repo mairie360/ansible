@@ -117,8 +117,9 @@ its bootstrap Applications at a path that does not exist yet. Order:
 
 1. Merge the `Deploiment` change on `main` (dev's bootstrap is unchanged: it
    follows `main` either way).
-2. Promote `Deploiment` to `staging` (Promote workflow, `target=staging`);
-   staging syncs by itself (`deploiment_auto_sync_envs`, MAIR-444).
+2. Promote `Deploiment` to `staging` (Promote workflow, `target=staging`),
+   then sync the staging Application from Argo CD: staging is synced by hand
+   (`deploiment_auto_sync_envs`, MAIR-801).
 3. Here: annotate `dev` and `staging` and set up the runner (the default
    `deploiment_revision_annotated_envs`), with the GitHub App variables of
    the next section:
@@ -432,9 +433,11 @@ syncing, and check that it converges on the new commit on its own.
 
 ### Sync policy of the instances (MAIR-801)
 
-`deploiment_auto_sync_envs` (`inventory/group_vars/all.yml`, `dev` and
-`staging`) lists the environments whose Application syncs by itself (prune +
-self-heal); the others, prod included, are synced by hand. The list is
+`deploiment_auto_sync_envs` (`inventory/group_vars/all.yml`, `dev` only)
+lists the environments whose Application syncs by itself (prune + self-heal);
+the others, staging and prod included, are synced by hand. Staging left the list
+on 2026-11-20: a Promote to staging, or a tag argocd-image-updater commits on
+the `staging` branch, lands when someone syncs it. The list is
 rendered into the ApplicationSet's `templatePatch`, so it only reaches the
 cluster when phase 2 re-applies the ApplicationSet.
 
@@ -467,7 +470,7 @@ reverted and shown as drift.
 | Environment | Who moves the image tags | Where |
 |---|---|---|
 | dev | argocd-image-updater, newest `dev-<sha>` | a `chore(deps)` PR on `main` editing `clusters/<org>/instances/dev/values.yaml`, auto-merged by Deploiment's `image-updater-automerge` workflow once CI passes |
-| staging | argocd-image-updater, newest `staging-<sha>` | a commit on the `staging` branch into `clusters/<org>/instances/staging/images.yaml` (read after `values.yaml`); staging syncs by itself |
+| staging | argocd-image-updater, newest `staging-<sha>` | a commit on the `staging` branch into `clusters/<org>/instances/staging/images.yaml` (read after `values.yaml`); deployed at the next hand sync of staging |
 | prod, clients | nobody: no `ImageUpdater` | the tags pinned in `clusters/_base/prod.yaml`, moved by a reviewed commit and a `Promote` |
 
 Every service is tracked, `database` and `liquibase-migrations` included. The

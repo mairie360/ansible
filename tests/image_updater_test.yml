@@ -103,11 +103,20 @@
         that: "'ignoreApplicationDifferences' not in appset.spec"
         fail_msg: "{{ appset.spec.ignoreApplicationDifferences | default('') | to_json }}"
 
-    - name: Staging syncs by itself, prod stays a deliberate sync
+    # MAIR-801 (2026-11-20): staging stays on manual sync, so a phase 2 run
+    # never turns its automated sync back on.
+    - name: "MAIR-801: only dev syncs by itself, staging and prod are deliberate syncs"
       ansible.builtin.assert:
         that:
-          - "'staging' in deploiment_auto_sync_envs"
-          - "'prod' not in deploiment_auto_sync_envs"
+          - deploiment_auto_sync_envs == ['dev']
+          - "'staging' not in automated_envs"
+          - "'prod' not in automated_envs"
+        fail_msg: "deploiment_auto_sync_envs={{ deploiment_auto_sync_envs }}, templatePatch automates {{ automated_envs }}"
+      vars:
+        automated_envs: >-
+          {{ appset.spec.templatePatch
+             | regex_search('basename [(]list([^)]*)[)]', '\1') | first
+             | regex_findall('"([^"]+)"') }}
 
     # MAIR-801: the ApplicationSet must automate exactly those environments.
     # The list is rendered into a Go template (templatePatch), so read it back
