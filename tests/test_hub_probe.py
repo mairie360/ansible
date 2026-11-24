@@ -57,3 +57,14 @@ class Wiring(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Mairie360Group(unittest.TestCase):
+    def test_mair_621_the_probe_is_enabled_on_the_mairie360_group(self):
+        """Left empty after MAIR-621, the probe never ran: ArgoCDMetricsSilent and
+        ProbeSilent fired in Cockpit and no site was watched from outside."""
+        group = yaml.safe_load((REPO / "inventory/group_vars/mairie360_argocd.yml").read_text())
+        self.assertRegex(
+            group["hub_probe_metrics_endpoint"],
+            r"^https://[0-9a-f-]{36}\.metrics\.cockpit\.fr-par\.scw\.cloud/otlp/v1/metrics$",
+            "OTLP push URL of the mairie360-probes source, same form as the instances' collectors")

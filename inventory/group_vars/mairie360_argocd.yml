@@ -6,7 +6,7 @@ github_runner_enabled: true
 # verify.yml on this group's instances from this machine (role ops_runner).
 ops_runner_enabled: true
 # MAIR-621: the external probe of the group's instances (role hub_probe) pushes
-# to Cockpit source mairie360-probes. TO FILL after the mairie360/Infra apply:
-#   scripts/tf.sh orgs/mairie360 output -json probes | jq -r .metrics_endpoint
-# Empty = no probe. Not secret (the token is read from the vault).
-hub_probe_metrics_endpoint: ""
+# to Cockpit source mairie360-probes (OTLP push URL, same form as the
+# instances' collectors in Deploiment). Empty = no probe. Not secret: the token
+# is read from the vault (/mairie360/hub/cockpit-token).
+hub_probe_metrics_endpoint: "https://60ca2d6c-4321-4ea9-8ff5-cd43a48253bf.metrics.cockpit.fr-par.scw.cloud/otlp/v1/metrics"
